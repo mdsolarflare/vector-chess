@@ -1,0 +1,183 @@
+[gd_scene load_steps=4 format=3 uid="uid://c8vectorchess01"]
+
+[ext_resource type="Script" path="res://scripts/main.gd" id="1_main"]
+[ext_resource type="Script" path="res://scripts/board/vector_board.gd" id="2_board"]
+
+[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_panel"]
+bg_color = Color(0.0627451, 0.0784314, 0.129412, 0.95)
+border_width_left = 2
+border_width_top = 2
+border_width_right = 2
+border_width_bottom = 2
+border_color = Color(0.18, 0.26, 0.4, 0.85)
+corner_radius_top_left = 8
+corner_radius_top_right = 8
+corner_radius_bottom_right = 8
+corner_radius_bottom_left = 8
+content_margin_left = 14.0
+content_margin_top = 14.0
+content_margin_right = 14.0
+content_margin_bottom = 14.0
+
+[node name="Main" type="Control"]
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+script = ExtResource("1_main")
+
+[node name="MarginContainer" type="MarginContainer" parent="."]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+theme_override_constants/margin_left = 16
+theme_override_constants/margin_top = 16
+theme_override_constants/margin_right = 16
+theme_override_constants/margin_bottom = 16
+
+[node name="MainLayout" type="BoxContainer" parent="MarginContainer"]
+unique_name_in_owner = true
+layout_mode = 2
+theme_override_constants/separation = 16
+
+[node name="VectorBoard" type="Control" parent="MarginContainer/MainLayout"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+size_flags_vertical = 3
+script = ExtResource("2_board")
+
+[node name="SidePanel" type="PanelContainer" parent="MarginContainer/MainLayout"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(340, 0)
+layout_mode = 2
+theme_override_styles/panel = SubResource("StyleBoxFlat_panel")
+
+[node name="VBox" type="VBoxContainer" parent="MarginContainer/MainLayout/SidePanel"]
+layout_mode = 2
+theme_override_constants/separation = 10
+
+[node name="TitleLabel" type="Label" parent="MarginContainer/MainLayout/SidePanel/VBox"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.92, 0.96, 1, 1)
+theme_override_font_sizes/font_size = 24
+text = "VECTOR CHESS"
+
+[node name="SubtitleLabel" type="Label" parent="MarginContainer/MainLayout/SidePanel/VBox"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.55, 0.68, 0.85, 1)
+theme_override_font_sizes/font_size = 13
+text = "Gliński Hexagonal Chess • 91 Hexes"
+
+[node name="HSeparator1" type="HSeparator" parent="MarginContainer/MainLayout/SidePanel/VBox"]
+layout_mode = 2
+
+[node name="StatusLabel" type="Label" parent="MarginContainer/MainLayout/SidePanel/VBox"]
+unique_name_in_owner = true
+layout_mode = 2
+theme_override_font_sizes/font_size = 18
+text = "Cyan's Turn"
+
+[node name="PromotionBox" type="VBoxContainer" parent="MarginContainer/MainLayout/SidePanel/VBox"]
+unique_name_in_owner = true
+visible = false
+layout_mode = 2
+theme_override_constants/separation = 6
+
+[node name="PromoteLabel" type="Label" parent="MarginContainer/MainLayout/SidePanel/VBox/PromotionBox"]
+layout_mode = 2
+theme_override_colors/font_color = Color(1, 0.84, 0.3, 1)
+theme_override_font_sizes/font_size = 13
+text = "PROMOTE PAWN TO:"
+
+[node name="PromoteGrid" type="GridContainer" parent="MarginContainer/MainLayout/SidePanel/VBox/PromotionBox"]
+layout_mode = 2
+theme_override_constants/h_separation = 6
+theme_override_constants/v_separation = 6
+columns = 4
+
+[node name="PromoteQueenBtn" type="Button" parent="MarginContainer/MainLayout/SidePanel/VBox/PromotionBox/PromoteGrid"]
+layout_mode = 2
+size_flags_horizontal = 3
+text = "Queen"
+
+[node name="PromoteRookBtn" type="Button" parent="MarginContainer/MainLayout/SidePanel/VBox/PromotionBox/PromoteGrid"]
+layout_mode = 2
+size_flags_horizontal = 3
+text = "Rook"
+
+[node name="PromoteBishopBtn" type="Button" parent="MarginContainer/MainLayout/SidePanel/VBox/PromotionBox/PromoteGrid"]
+layout_mode = 2
+size_flags_horizontal = 3
+text = "Bishop"
+
+[node name="PromoteKnightBtn" type="Button" parent="MarginContainer/MainLayout/SidePanel/VBox/PromotionBox/PromoteGrid"]
+layout_mode = 2
+size_flags_horizontal = 3
+text = "Knight"
+
+[node name="TelemetryLabel" type="RichTextLabel" parent="MarginContainer/MainLayout/SidePanel/VBox"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(0, 72)
+layout_mode = 2
+bbcode_enabled = true
+text = "Select a polygon piece to inspect its legal displacement vectors."
+fit_content = true
+scroll_active = false
+
+[node name="HSeparator2" type="HSeparator" parent="MarginContainer/MainLayout/SidePanel/VBox"]
+layout_mode = 2
+
+[node name="HistoryHeader" type="Label" parent="MarginContainer/MainLayout/SidePanel/VBox"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.65, 0.75, 0.88, 1)
+theme_override_font_sizes/font_size = 13
+text = "VECTOR LOG"
+
+[node name="HistoryLabel" type="RichTextLabel" parent="MarginContainer/MainLayout/SidePanel/VBox"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_vertical = 3
+bbcode_enabled = true
+scroll_following = true
+
+[node name="ControlsGrid" type="GridContainer" parent="MarginContainer/MainLayout/SidePanel/VBox"]
+layout_mode = 2
+theme_override_constants/h_separation = 8
+theme_override_constants/v_separation = 8
+columns = 2
+
+[node name="NewGameButton" type="Button" parent="MarginContainer/MainLayout/SidePanel/VBox/ControlsGrid"]
+layout_mode = 2
+size_flags_horizontal = 3
+text = "New Game"
+
+[node name="UndoButton" type="Button" parent="MarginContainer/MainLayout/SidePanel/VBox/ControlsGrid"]
+layout_mode = 2
+size_flags_horizontal = 3
+text = "Undo"
+
+[node name="FlipButton" type="Button" parent="MarginContainer/MainLayout/SidePanel/VBox/ControlsGrid"]
+layout_mode = 2
+size_flags_horizontal = 3
+text = "Flip Board"
+
+[node name="VectorsButton" type="Button" parent="MarginContainer/MainLayout/SidePanel/VBox/ControlsGrid"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+text = "Vectors: OFF"
+
+[connection signal="pressed" from="MarginContainer/MainLayout/SidePanel/VBox/PromotionBox/PromoteGrid/PromoteQueenBtn" to="." method="_on_promote_queen_pressed"]
+[connection signal="pressed" from="MarginContainer/MainLayout/SidePanel/VBox/PromotionBox/PromoteGrid/PromoteRookBtn" to="." method="_on_promote_rook_pressed"]
+[connection signal="pressed" from="MarginContainer/MainLayout/SidePanel/VBox/PromotionBox/PromoteGrid/PromoteBishopBtn" to="." method="_on_promote_bishop_pressed"]
+[connection signal="pressed" from="MarginContainer/MainLayout/SidePanel/VBox/PromotionBox/PromoteGrid/PromoteKnightBtn" to="." method="_on_promote_knight_pressed"]
+[connection signal="pressed" from="MarginContainer/MainLayout/SidePanel/VBox/ControlsGrid/NewGameButton" to="." method="_on_new_game_pressed"]
+[connection signal="pressed" from="MarginContainer/MainLayout/SidePanel/VBox/ControlsGrid/UndoButton" to="." method="_on_undo_pressed"]
+[connection signal="pressed" from="MarginContainer/MainLayout/SidePanel/VBox/ControlsGrid/FlipButton" to="." method="_on_flip_pressed"]
+[connection signal="pressed" from="MarginContainer/MainLayout/SidePanel/VBox/ControlsGrid/VectorsButton" to="." method="_on_vectors_pressed"]
