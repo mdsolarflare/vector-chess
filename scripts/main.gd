@@ -12,14 +12,17 @@ const SHADE_NAMES: Array[String] = ["Dark", "Mid", "Light"]
 @onready var vectors_button: Button = %VectorsButton
 @onready var side_panel: PanelContainer = %SidePanel
 @onready var promotion_box: VBoxContainer = %PromotionBox
+@onready var toggle_panel_button: Button = %TogglePanelButton
 
 
 func _ready() -> void:
 	vector_board.move_executed.connect(_on_move_executed)
 	vector_board.selection_changed.connect(_on_selection_changed)
 	vector_board.promotion_requested.connect(_on_promotion_requested)
+	toggle_panel_button.draw.connect(_on_toggle_panel_button_draw)
 	get_viewport().size_changed.connect(_on_viewport_size_changed)
 	_on_viewport_size_changed()
+	_update_toggle_panel_button()
 	_refresh_hud()
 
 
@@ -35,6 +38,75 @@ func _on_viewport_size_changed() -> void:
 		side_panel.custom_minimum_size = Vector2(340, 0)
 
 
+func _on_toggle_panel_pressed() -> void:
+	side_panel.visible = not side_panel.visible
+	_update_toggle_panel_button()
+	vector_board.queue_redraw()
+
+
+func _update_toggle_panel_button() -> void:
+	if toggle_panel_button == null or side_panel == null:
+		return
+	toggle_panel_button.text = ""
+	toggle_panel_button.tooltip_text = "Hide Side Panel" if side_panel.visible else "Show Side Panel"
+	toggle_panel_button.queue_redraw()
+
+
+func _on_toggle_panel_button_draw() -> void:
+	var btn := toggle_panel_button
+	var s := btn.size
+	var icon_w := 20.0
+	var icon_h := 15.0
+	var top_left := (s - Vector2(icon_w, icon_h)) * 0.5
+	var rect := Rect2(top_left, Vector2(icon_w, icon_h))
+
+	var stroke_col := Color(0.75, 0.88, 1.0, 0.95)
+	var fill_col := Color(0.0, 0.94, 1.0, 0.28)
+	var split_x := rect.position.x + icon_w * 0.65
+
+	# If panel is visible, highlight the right-hand sidebar column fill
+	if side_panel != null and side_panel.visible:
+		var side_rect := Rect2(
+			Vector2(split_x, rect.position.y + 1.0),
+			Vector2(rect.end.x - split_x - 1.0, icon_h - 2.0)
+		)
+		btn.draw_rect(side_rect, fill_col, true)
+
+	# Outer frame of the split-panel icon
+	btn.draw_rect(rect, stroke_col, false, 1.6)
+
+	# Vertical sidebar divider line
+	btn.draw_line(
+		Vector2(split_x, rect.position.y),
+		Vector2(split_x, rect.end.y),
+		stroke_col,
+		1.5,
+		true
+	)
+
+	# Collapse/expand chevron inside the main viewport section
+	var cy := rect.get_center().y
+	var cx := rect.position.x + (split_x - rect.position.x) * 0.5
+	var chev_w := 2.4
+	var chev_h := 3.0
+	var chevron: PackedVector2Array
+	if side_panel != null and side_panel.visible:
+		# Point right (collapse panel ->)
+		chevron = PackedVector2Array([
+			Vector2(cx - chev_w * 0.5, cy - chev_h),
+			Vector2(cx + chev_w * 0.5, cy),
+			Vector2(cx - chev_w * 0.5, cy + chev_h),
+		])
+	else:
+		# Point left (expand panel <-)
+		chevron = PackedVector2Array([
+			Vector2(cx + chev_w * 0.5, cy - chev_h),
+			Vector2(cx - chev_w * 0.5, cy),
+			Vector2(cx + chev_w * 0.5, cy + chev_h),
+		])
+	btn.draw_polyline(chevron, stroke_col, 1.6, true)
+
+
 func _on_move_executed(_move: GameRules.VectorMove, _notation: String) -> void:
 	promotion_box.visible = false
 	_refresh_hud()
@@ -45,6 +117,9 @@ func _on_selection_changed(piece: PieceData, hovered_move: GameRules.VectorMove)
 
 
 func _on_promotion_requested(_pending_move: GameRules.VectorMove, _team: PieceData.Team) -> void:
+	if not side_panel.visible:
+		side_panel.visible = true
+		_update_toggle_panel_button()
 	promotion_box.visible = true
 	status_label.text = "Select Promotion Piece"
 

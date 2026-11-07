@@ -72,7 +72,7 @@ text = "VECTOR CHESS"
 layout_mode = 2
 theme_override_colors/font_color = Color(0.55, 0.68, 0.85, 1)
 theme_override_font_sizes/font_size = 13
-text = "Gliński Hexagonal Chess • 91 Hexes"
+text = "Glinski Hexagonal Chess - 91 Hexes"
 
 [node name="HSeparator1" type="HSeparator" parent="MarginContainer/MainLayout/SidePanel/VBox"]
 layout_mode = 2
@@ -173,6 +173,20 @@ layout_mode = 2
 size_flags_horizontal = 3
 text = "Vectors: OFF"
 
+[node name="TogglePanelButton" type="Button" parent="."]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(36, 36)
+layout_mode = 1
+anchors_preset = 1
+anchor_left = 1.0
+anchor_right = 1.0
+offset_left = -60.0
+offset_top = 24.0
+offset_right = -24.0
+offset_bottom = 60.0
+grow_horizontal = 0
+tooltip_text = "Hide Side Panel"
+
 [connection signal="pressed" from="MarginContainer/MainLayout/SidePanel/VBox/PromotionBox/PromoteGrid/PromoteQueenBtn" to="." method="_on_promote_queen_pressed"]
 [connection signal="pressed" from="MarginContainer/MainLayout/SidePanel/VBox/PromotionBox/PromoteGrid/PromoteRookBtn" to="." method="_on_promote_rook_pressed"]
 [connection signal="pressed" from="MarginContainer/MainLayout/SidePanel/VBox/PromotionBox/PromoteGrid/PromoteBishopBtn" to="." method="_on_promote_bishop_pressed"]
@@ -181,3 +195,4 @@ text = "Vectors: OFF"
 [connection signal="pressed" from="MarginContainer/MainLayout/SidePanel/VBox/ControlsGrid/UndoButton" to="." method="_on_undo_pressed"]
 [connection signal="pressed" from="MarginContainer/MainLayout/SidePanel/VBox/ControlsGrid/FlipButton" to="." method="_on_flip_pressed"]
 [connection signal="pressed" from="MarginContainer/MainLayout/SidePanel/VBox/ControlsGrid/VectorsButton" to="." method="_on_vectors_pressed"]
+[connection signal="pressed" from="TogglePanelButton" to="." method="_on_toggle_panel_pressed"]
