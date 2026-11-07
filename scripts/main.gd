@@ -23,6 +23,7 @@ func _ready() -> void:
 	get_viewport().size_changed.connect(_on_viewport_size_changed)
 	_on_viewport_size_changed()
 	_update_toggle_panel_button()
+	_update_vectors_button()
 	_refresh_hud()
 
 
@@ -50,6 +51,12 @@ func _update_toggle_panel_button() -> void:
 	toggle_panel_button.text = ""
 	toggle_panel_button.tooltip_text = "Hide Side Panel" if side_panel.visible else "Show Side Panel"
 	toggle_panel_button.queue_redraw()
+
+
+func _update_vectors_button() -> void:
+	if vectors_button == null or vector_board == null:
+		return
+	vectors_button.text = "Vectors: ON" if vector_board.show_vectors else "Vectors: OFF"
 
 
 func _on_toggle_panel_button_draw() -> void:
@@ -202,8 +209,8 @@ func _on_flip_pressed() -> void:
 
 
 func _on_vectors_pressed() -> void:
-	var active := vector_board.toggle_vector_overlay()
-	vectors_button.text = "Vectors: ON" if active else "Vectors: OFF"
+	vector_board.toggle_vector_overlay()
+	_update_vectors_button()
 
 
 func _on_promote_queen_pressed() -> void:

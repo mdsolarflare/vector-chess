@@ -1,8 +1,8 @@
 class_name VectorBoard
 extends Control
-## Procedural vector-graphics hexagonal chessboard renderer for Gliński's Hexagonal Chess.
+## Procedural vector-graphics hexagonal chessboard renderer for Glinski's Hexagonal Chess.
 ## Renders the 91-cell flat-top hexagonal board in 3 colors with axial coordinate hit-testing,
-## displacement vector rays, and procedural polygon pieces.
+## displacement vector rays, and Option A Low-Poly Faceted Staunton piece silhouettes.
 
 signal move_executed(move: GameRules.VectorMove, notation: String)
 signal selection_changed(piece: PieceData, hovered_move: GameRules.VectorMove)
@@ -28,7 +28,7 @@ var hovered_cell: Vector2i = GameRules.INVALID_HEX
 var hovered_move: GameRules.VectorMove = null
 var pending_promotion_move: GameRules.VectorMove = null
 var board_flipped: bool = false
-var show_all_team_vectors: bool = false
+var show_vectors: bool = true
 var show_cell_coords: bool = true
 
 var _board_center: Vector2 = Vector2.ZERO
@@ -91,9 +91,9 @@ func toggle_flip_board() -> void:
 
 
 func toggle_vector_overlay() -> bool:
-	show_all_team_vectors = not show_all_team_vectors
+	show_vectors = not show_vectors
 	queue_redraw()
-	return show_all_team_vectors
+	return show_vectors
 
 
 func complete_promotion(chosen_type: PieceData.Type) -> void:
@@ -199,13 +199,13 @@ func _draw() -> void:
 		outline.append(poly[0])
 		draw_polyline(outline, COLOR_GRID_LINE, 1.3, true)
 
-		# Subtle starting-pawn chevron indicator on empty pawn start cells
+		# Subtle starting-pawn hex indicator
 		if rules.is_pawn_start_cell(PieceData.Team.CYAN, cell) or rules.is_pawn_start_cell(PieceData.Team.MAGENTA, cell):
-			var inner_hex := _make_hex_polygon(center, _hex_radius * 0.22)
+			var inner_hex := _make_hex_polygon(center, _hex_radius * 0.20)
 			inner_hex.append(inner_hex[0])
-			draw_polyline(inner_hex, Color(0.35, 0.5, 0.7, 0.22), 1.0, true)
+			draw_polyline(inner_hex, Color(0.35, 0.5, 0.7, 0.20), 1.0, true)
 
-	# 2. Draw coordinate labels (files along bottom/top, algebraic inside edge cells)
+	# 2. Draw coordinate labels
 	if show_cell_coords:
 		_draw_hex_coordinates()
 
@@ -215,10 +215,11 @@ func _draw() -> void:
 		var to_c := _axial_to_screen(Vector2(rules.last_move.to))
 		_draw_hex_highlight(from_c, Color(COLOR_LAST_MOVE, 0.16), Color(COLOR_LAST_MOVE, 0.55), 1.8)
 		_draw_hex_highlight(to_c, Color(COLOR_LAST_MOVE, 0.24), Color(COLOR_LAST_MOVE, 0.75), 2.2)
-		_draw_vector_arrow(from_c, to_c, COLOR_LAST_MOVE, 2.0, false)
+		if show_vectors:
+			_draw_vector_arrow(from_c, to_c, COLOR_LAST_MOVE, 2.0, false)
 
-	# 4. Optional team-wide vector overlay
-	if show_all_team_vectors:
+	# 4. Team-wide vector overlay (when Vectors: ON)
+	if show_vectors:
 		for p in rules.pieces:
 			if p.team == rules.current_turn:
 				var p_moves := rules.get_legal_moves_for_piece(p)
@@ -229,7 +230,7 @@ func _draw() -> void:
 					var dest := _axial_to_screen(Vector2(mv.to))
 					_draw_vector_arrow(origin, dest, ray_col, 1.4, false)
 
-	# 5. Selected piece & legal move vectors
+	# 5. Selected piece & legal move targets/vectors
 	if selected_piece != null:
 		var sel_center := _axial_to_screen(Vector2(selected_piece.grid_pos))
 		var sel_col := COLOR_CYAN if selected_piece.team == PieceData.Team.CYAN else COLOR_MAGENTA
@@ -248,7 +249,8 @@ func _draw() -> void:
 			else:
 				draw_circle(dest, _hex_radius * (0.24 if is_hovered else 0.16), Color(col, alpha))
 
-			_draw_vector_arrow(origin, dest, Color(col, alpha), width, is_hovered)
+			if show_vectors:
+				_draw_vector_arrow(origin, dest, Color(col, alpha), width, is_hovered)
 
 	# 6. Hover cursor hex outline
 	if GameRules.is_inside_board(hovered_cell):
@@ -269,7 +271,7 @@ func _draw() -> void:
 						3.0
 					)
 
-	# 8. Draw all pieces
+	# 8. Draw all pieces using Option A Low-Poly Faceted Silhouettes
 	for p in rules.pieces:
 		_draw_polygon_piece(p)
 
@@ -288,53 +290,81 @@ func _draw_hex_highlight(center: Vector2, fill_col: Color, border_col: Color, bo
 
 func _draw_polygon_piece(piece: PieceData) -> void:
 	var center := _axial_to_screen(piece.visual_pos)
-	var radius := _hex_radius * 0.68
-	var primary := COLOR_CYAN if piece.team == PieceData.Team.CYAN else COLOR_MAGENTA
-	var fill_col := Color(primary.r * 0.18, primary.g * 0.18, primary.b * 0.24, 0.92)
+	var piece_scale := PieceData.get_piece_scale(piece.type)
+	var radius := _hex_radius * piece_scale
 	var is_selected := (selected_piece != null and selected_piece.id == piece.id)
 
 	if is_selected:
 		radius *= (1.0 + 0.07 * sin(_pulse_time * 6.0))
 
-	var layers := piece.get_normalized_polygons()
-	for layer_idx in range(layers.size()):
-		var norm_poly: PackedVector2Array = layers[layer_idx]
+	draw_faceted_piece_icon(self, piece.type, piece.team, center, radius, is_selected)
+
+
+static func draw_faceted_piece_icon(
+	canvas: CanvasItem,
+	p_type: PieceData.Type,
+	p_team: PieceData.Team,
+	center: Vector2,
+	radius: float,
+	is_selected: bool = false
+) -> void:
+	var primary := COLOR_CYAN if p_team == PieceData.Team.CYAN else COLOR_MAGENTA
+	var dark_base := Color(0.03, 0.04, 0.08, 0.96)
+	var bright_highlight := primary.lightened(0.45)
+
+	var mesh := PieceData.get_faceted_mesh(p_type)
+	var facets: Array = mesh["facets"]
+	var outlines: Array = mesh["outlines"]
+	var accents: Array = mesh["accents"]
+
+	# 1. Draw each triangulated/quad low-poly facet with directional lighting + internal crease line
+	for f in facets:
+		var norm_poly: PackedVector2Array = f["poly"]
+		var shade: float = f["shade"]
+		if is_selected:
+			shade = clampf(shade + 0.12, 0.0, 1.0)
+
 		var world_poly := PackedVector2Array()
 		world_poly.resize(norm_poly.size())
-
-		var rot := PI if board_flipped else 0.0
-		if is_selected and layer_idx > 0:
-			rot += _pulse_time * 1.2
-
 		for i in range(norm_poly.size()):
-			world_poly[i] = center + norm_poly[i].rotated(rot) * radius
+			world_poly[i] = center + norm_poly[i] * radius
 
-		if layer_idx == 0:
-			draw_colored_polygon(world_poly, fill_col)
-			var closed := world_poly.duplicate()
-			closed.append(world_poly[0])
-			draw_polyline(closed, Color(primary, 0.35), 4.0, true)
-			draw_polyline(closed, primary, 2.0, true)
+		# Interpolate facet fill color from deep shadow through team color to bright highlight
+		var facet_col: Color
+		if shade < 0.65:
+			var t := shade / 0.65
+			facet_col = dark_base.lerp(primary.darkened(0.15), t)
 		else:
-			var closed_inner := world_poly.duplicate()
-			closed_inner.append(world_poly[0])
-			var inner_col := Color(1.0, 1.0, 1.0, 0.9) if is_selected else Color(primary.lightened(0.35), 0.85)
-			draw_polyline(closed_inner, inner_col, 1.5, true)
+			var t := (shade - 0.65) / 0.35
+			facet_col = primary.darkened(0.15).lerp(bright_highlight, t)
+		facet_col.a = 0.96
 
-	# Piece letter badge in center for instant chess readability alongside polygon shape
-	var font := ThemeDB.fallback_font
-	if font != null and _hex_radius >= 18.0:
-		var code := PieceData.get_piece_short_code(piece.type)
-		var font_size := clampi(int(_hex_radius * 0.42), 9, 14)
-		draw_string(
-			font,
-			center + Vector2(-float(font_size) * 0.3, float(font_size) * 0.35),
-			code,
-			HORIZONTAL_ALIGNMENT_CENTER,
-			-1,
-			font_size,
-			Color(1.0, 1.0, 1.0, 0.92)
-		)
+		canvas.draw_colored_polygon(world_poly, facet_col)
+
+		# Subtle internal origami/crystal facet crease edge
+		var crease := world_poly.duplicate()
+		crease.append(world_poly[0])
+		canvas.draw_polyline(crease, Color(primary.lightened(0.25), 0.35), 1.1, true)
+
+	# 2. Draw outer glowing silhouette contour
+	for norm_outline in outlines:
+		var world_outline := PackedVector2Array()
+		world_outline.resize(norm_outline.size())
+		for i in range(norm_outline.size()):
+			world_outline[i] = center + norm_outline[i] * radius
+
+		canvas.draw_polyline(world_outline, Color(primary, 0.38), 3.6, true)
+		var rim_col := Color(1.0, 1.0, 1.0, 0.95) if is_selected else primary.lightened(0.22)
+		canvas.draw_polyline(world_outline, rim_col, 1.7, true)
+
+	# 3. Draw bright geometric accents (Knight eye, Bishop cleft slash, Queen crown pearls)
+	var accent_col := Color(1.0, 1.0, 1.0, 0.92)
+	for norm_accent in accents:
+		var world_accent := PackedVector2Array()
+		world_accent.resize(norm_accent.size())
+		for i in range(norm_accent.size()):
+			world_accent[i] = center + norm_accent[i] * radius
+		canvas.draw_polyline(world_accent, accent_col, 1.6, true)
 
 
 func _draw_vector_arrow(from_pt: Vector2, to_pt: Vector2, color: Color, width: float, draw_label: bool) -> void:
@@ -362,7 +392,7 @@ func _draw_vector_arrow(from_pt: Vector2, to_pt: Vector2, color: Color, width: f
 	if draw_label and ThemeDB.fallback_font != null:
 		var mid := (start_pt + tip_pt) * 0.5 + normal * 12.0
 		var axial_delta := _screen_to_axial(to_pt) - _screen_to_axial(from_pt)
-		var label := "Δ(%+d,%+d)" % [axial_delta.x, axial_delta.y]
+		var label := "d(%+d,%+d)" % [axial_delta.x, axial_delta.y]
 		draw_string(ThemeDB.fallback_font, mid, label, HORIZONTAL_ALIGNMENT_CENTER, -1, 11, color.lightened(0.35))
 
 
@@ -406,7 +436,6 @@ func _make_hex_polygon(center: Vector2, radius: float) -> PackedVector2Array:
 	var pts := PackedVector2Array()
 	pts.resize(6)
 	for i in range(6):
-		# Flat-top hexagon vertices at 0°, 60°, 120°, 180°, 240°, 300°
 		var angle := TAU * float(i) / 6.0
 		pts[i] = center + Vector2(cos(angle), sin(angle)) * radius
 	return pts
@@ -415,9 +444,6 @@ func _make_hex_polygon(center: Vector2, radius: float) -> PackedVector2Array:
 func _compute_board_metrics() -> void:
 	var padding := 20.0
 	var avail := size - Vector2(padding * 2.0, padding * 2.0)
-	# Flat-top hex board of radius 5 spans:
-	# Width = (3/2 * 10 + 2) * R = 17.0 * R
-	# Height = (11 * sqrt(3)) * R ≈ 19.0526 * R
 	var max_r_x := avail.x / 17.2
 	var max_r_y := avail.y / (11.2 * SQRT3)
 	_hex_radius = maxf(minf(max_r_x, max_r_y), 10.0)
