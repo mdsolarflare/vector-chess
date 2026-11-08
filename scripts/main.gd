@@ -6,6 +6,15 @@ extends Control
 const SHADE_NAMES: Array[String] = ["Dark", "Mid", "Light"]
 const SLIDER_UNLOCK_THRESHOLD: float = 98.0
 const AI_THINK_DELAY_SEC: float = 0.35
+const SOFTWARE_RENDERER_PATTERNS: Array[String] = [
+	"SwiftShader",
+	"llvmpipe",
+	"Basic Render",
+	"softpipe",
+	"lavapipe",
+	"d3d10warp",
+	"Software",
+]
 
 @onready var split_container: BoxContainer = %MainLayout
 @onready var vector_board: VectorBoard = %VectorBoard
@@ -36,6 +45,10 @@ const AI_THINK_DELAY_SEC: float = 0.35
 @onready var slider_hint_label: Label = %SliderHintLabel
 @onready var cancel_new_game_button: Button = %CancelNewGameButton
 @onready var confirm_new_game_button: Button = %ConfirmNewGameButton
+
+@onready var gpu_warning_banner: PanelContainer = %GpuWarningBanner
+@onready var gpu_warning_label: Label = %GpuWarningLabel
+@onready var dismiss_gpu_banner_button: Button = %DismissGpuBannerButton
 
 ## Active match settings
 var is_single_player: bool = true
@@ -75,6 +88,8 @@ func _ready() -> void:
 	diff_med_button.draw.connect(_on_diff_med_button_draw)
 	diff_hard_button.draw.connect(_on_diff_hard_button_draw)
 
+	_check_browser_gpu()
+
 	get_viewport().size_changed.connect(_on_viewport_size_changed)
 	_on_viewport_size_changed()
 	_update_toggle_panel_button()
@@ -83,6 +98,42 @@ func _ready() -> void:
 
 	# Default startup mode: open in the New Game Setup modal
 	_open_new_game_modal(true)
+
+
+static func is_software_renderer(adapter: String) -> bool:
+	for pattern in SOFTWARE_RENDERER_PATTERNS:
+		if adapter.containsn(pattern):
+			return true
+	return false
+
+
+func _check_browser_gpu() -> void:
+	if OS.has_feature("web"):
+		var adapter := RenderingServer.get_video_adapter_name()
+		if is_software_renderer(adapter):
+			_apply_software_renderer_fallback(adapter)
+
+
+func _apply_software_renderer_fallback(adapter: String) -> void:
+	# Drop 2D MSAA and CPU-side polyline anti-aliasing immediately to save CPU fill-rate
+	get_viewport().msaa_2d = Viewport.MSAA_DISABLED
+	if vector_board != null:
+		vector_board.set_line_antialiasing(false)
+	else:
+		VectorBoard.line_aa_enabled = false
+
+	if gpu_warning_label != null:
+		gpu_warning_label.text = (
+			"Software rendering detected (%s). 2D MSAA & line AA disabled — enable Browser Hardware Acceleration for best performance."
+			% adapter
+		)
+	if gpu_warning_banner != null:
+		gpu_warning_banner.visible = true
+
+
+func _on_dismiss_gpu_banner_pressed() -> void:
+	if gpu_warning_banner != null:
+		gpu_warning_banner.visible = false
 
 
 func _on_viewport_size_changed() -> void:
@@ -145,6 +196,7 @@ func _on_toggle_panel_button_draw() -> void:
 	var icon_h := 15.0
 	var top_left := (s - Vector2(icon_w, icon_h)) * 0.5
 	var rect := Rect2(top_left, Vector2(icon_w, icon_h))
+	var aa := VectorBoard.line_aa_enabled
 
 	var stroke_col := Color(0.75, 0.88, 1.0, 0.95)
 	var fill_col := Color(0.0, 0.94, 1.0, 0.28)
@@ -163,7 +215,7 @@ func _on_toggle_panel_button_draw() -> void:
 		Vector2(split_x, rect.end.y),
 		stroke_col,
 		1.5,
-		true
+		aa
 	)
 
 	var cy := rect.get_center().y
@@ -183,7 +235,7 @@ func _on_toggle_panel_button_draw() -> void:
 			Vector2(cx - chev_w * 0.5, cy),
 			Vector2(cx + chev_w * 0.5, cy + chev_h),
 		])
-	btn.draw_polyline(chevron, stroke_col, 1.6, true)
+	btn.draw_polyline(chevron, stroke_col, 1.6, aa)
 
 
 ## Draws a flat-top Hexagon with a bold '+' sign inside for New Game.
@@ -193,6 +245,7 @@ func _on_new_game_button_draw() -> void:
 	var r := 12.5
 	var stroke_col := Color(0.82, 0.92, 1.0, 0.95)
 	var fill_col := Color(0.0, 0.94, 1.0, 0.12)
+	var aa := VectorBoard.line_aa_enabled
 
 	var hex := PackedVector2Array()
 	hex.resize(7)
@@ -202,11 +255,11 @@ func _on_new_game_button_draw() -> void:
 	hex[6] = hex[0]
 
 	btn.draw_colored_polygon(hex.slice(0, 6), fill_col)
-	btn.draw_polyline(hex, stroke_col, 1.8, true)
+	btn.draw_polyline(hex, stroke_col, 1.8, aa)
 
 	var arm := 5.5
-	btn.draw_line(c + Vector2(-arm, 0), c + Vector2(arm, 0), VectorBoard.COLOR_CYAN, 2.2, true)
-	btn.draw_line(c + Vector2(0, -arm), c + Vector2(0, arm), VectorBoard.COLOR_CYAN, 2.2, true)
+	btn.draw_line(c + Vector2(-arm, 0), c + Vector2(arm, 0), VectorBoard.COLOR_CYAN, 2.2, aa)
+	btn.draw_line(c + Vector2(0, -arm), c + Vector2(0, arm), VectorBoard.COLOR_CYAN, 2.2, aa)
 
 
 ## Draws a Left Hook Arrow (↩) for Undo.
@@ -215,6 +268,7 @@ func _on_undo_button_draw() -> void:
 	var c := btn.size * 0.5
 	var alpha := 0.32 if btn.disabled else 0.95
 	var col := Color(0.82, 0.92, 1.0, alpha)
+	var aa := VectorBoard.line_aa_enabled
 
 	var arc_center := c + Vector2(3.5, 1.5)
 	var arc_r := 6.5
@@ -230,7 +284,7 @@ func _on_undo_button_draw() -> void:
 		path.append(arc_center + Vector2(cos(angle), sin(angle)) * arc_r)
 	path.append(Vector2(c.x - 5.5, bot_y))
 
-	btn.draw_polyline(path, col, 2.0, true)
+	btn.draw_polyline(path, col, 2.0, aa)
 
 	var tip := Vector2(left_x - 1.0, top_y)
 	var head := PackedVector2Array([
@@ -238,7 +292,7 @@ func _on_undo_button_draw() -> void:
 		tip,
 		tip + Vector2(5.5, 4.5),
 	])
-	btn.draw_polyline(head, col, 2.0, true)
+	btn.draw_polyline(head, col, 2.0, aa)
 
 
 ## Draws Dual Opposing Vertical Arrows (⇅) for Flip Board, colored by current team orientation.
@@ -248,26 +302,27 @@ func _on_flip_button_draw() -> void:
 	var flipped := vector_board != null and vector_board.board_flipped
 	var up_col := VectorBoard.COLOR_MAGENTA if flipped else VectorBoard.COLOR_CYAN
 	var down_col := VectorBoard.COLOR_CYAN if flipped else VectorBoard.COLOR_MAGENTA
+	var aa := VectorBoard.line_aa_enabled
 
 	var lx := c.x - 5.0
 	var top_y := c.y - 9.5
 	var bot_y := c.y + 9.5
-	btn.draw_line(Vector2(lx, bot_y), Vector2(lx, top_y), up_col, 2.0, true)
+	btn.draw_line(Vector2(lx, bot_y), Vector2(lx, top_y), up_col, 2.0, aa)
 	var up_head := PackedVector2Array([
 		Vector2(lx - 4.2, top_y + 4.8),
 		Vector2(lx, top_y),
 		Vector2(lx + 4.2, top_y + 4.8),
 	])
-	btn.draw_polyline(up_head, up_col, 2.0, true)
+	btn.draw_polyline(up_head, up_col, 2.0, aa)
 
 	var rx := c.x + 5.0
-	btn.draw_line(Vector2(rx, top_y), Vector2(rx, bot_y), down_col, 2.0, true)
+	btn.draw_line(Vector2(rx, top_y), Vector2(rx, bot_y), down_col, 2.0, aa)
 	var down_head := PackedVector2Array([
 		Vector2(rx - 4.2, bot_y - 4.8),
 		Vector2(rx, bot_y),
 		Vector2(rx + 4.2, bot_y - 4.8),
 	])
-	btn.draw_polyline(down_head, down_col, 2.0, true)
+	btn.draw_polyline(down_head, down_col, 2.0, aa)
 
 
 ## Draws Radiating Vector Rays from an origin node for Vectors ON/OFF.
@@ -275,6 +330,7 @@ func _on_vectors_button_draw() -> void:
 	var btn := vectors_button
 	var c := btn.size * 0.5
 	var active := vector_board != null and vector_board.show_vectors
+	var aa := VectorBoard.line_aa_enabled
 
 	if active:
 		var inner_rect := Rect2(Vector2(3, 3), btn.size - Vector2(6, 6))
@@ -293,7 +349,7 @@ func _on_vectors_button_draw() -> void:
 		var normal := Vector2(-dir.y, dir.x)
 		var tip := origin + dir * len_px
 
-		btn.draw_line(origin, tip, ray_col, 1.8 if active else 1.4, true)
+		btn.draw_line(origin, tip, ray_col, 1.8 if active else 1.4, aa)
 		var head := PackedVector2Array([
 			tip,
 			tip - dir * 5.0 + normal * 2.8,
@@ -413,7 +469,7 @@ func _draw_team_order_button(
 	var badge_fill_alpha := 0.28 if is_selected else 0.12
 	var badge_stroke_alpha := 1.0 if is_selected else 0.65
 	btn.draw_colored_polygon(hex.slice(0, 6), Color(team_col.r, team_col.g, team_col.b, badge_fill_alpha))
-	btn.draw_polyline(hex, Color(team_col.r, team_col.g, team_col.b, badge_stroke_alpha), 1.8 if is_selected else 1.3, true)
+	btn.draw_polyline(hex, Color(team_col.r, team_col.g, team_col.b, badge_stroke_alpha), 1.8 if is_selected else 1.3, VectorBoard.line_aa_enabled)
 
 	var font := ThemeDB.fallback_font
 	if font != null:
@@ -462,14 +518,15 @@ func _on_cancel_new_game_button_draw() -> void:
 	var c := btn.size * 0.5
 	var alpha := 0.28 if btn.disabled else 0.95
 	var red_col := Color(1.0, 0.30, 0.34, alpha)
+	var aa := VectorBoard.line_aa_enabled
 
 	var inner_rect := Rect2(Vector2(3, 3), btn.size - Vector2(6, 6))
 	btn.draw_rect(inner_rect, Color(1.0, 0.25, 0.30, 0.04 if btn.disabled else 0.12), true)
 	btn.draw_rect(inner_rect, Color(1.0, 0.30, 0.34, 0.18 if btn.disabled else 0.48), false, 1.3)
 
 	var arm := 6.8
-	btn.draw_line(c + Vector2(-arm, -arm), c + Vector2(arm, arm), red_col, 2.4, true)
-	btn.draw_line(c + Vector2(-arm, arm), c + Vector2(arm, -arm), red_col, 2.4, true)
+	btn.draw_line(c + Vector2(-arm, -arm), c + Vector2(arm, arm), red_col, 2.4, aa)
+	btn.draw_line(c + Vector2(-arm, arm), c + Vector2(arm, -arm), red_col, 2.4, aa)
 
 
 ## Draws a green '+' icon on the New Game modal Confirm button (dimmed until unlocked).
@@ -477,6 +534,7 @@ func _on_confirm_new_game_button_draw() -> void:
 	var btn := confirm_new_game_button
 	var c := btn.size * 0.5
 	var unlocked := not btn.disabled
+	var aa := VectorBoard.line_aa_enabled
 
 	if unlocked:
 		var inner_rect := Rect2(Vector2(3, 3), btn.size - Vector2(6, 6))
@@ -485,8 +543,8 @@ func _on_confirm_new_game_button_draw() -> void:
 
 	var green_col := Color(0.25, 1.0, 0.60, 0.98) if unlocked else Color(0.25, 1.0, 0.60, 0.26)
 	var arm := 7.5
-	btn.draw_line(c + Vector2(-arm, 0), c + Vector2(arm, 0), green_col, 2.6, true)
-	btn.draw_line(c + Vector2(0, -arm), c + Vector2(0, arm), green_col, 2.6, true)
+	btn.draw_line(c + Vector2(-arm, 0), c + Vector2(arm, 0), green_col, 2.6, aa)
+	btn.draw_line(c + Vector2(0, -arm), c + Vector2(0, arm), green_col, 2.6, aa)
 
 
 func _on_move_executed(_move: GameRules.VectorMove, _notation: String) -> void:

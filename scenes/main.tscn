@@ -1,4 +1,4 @@
-[gd_scene load_steps=5 format=3 uid="uid://c8vectorchess01"]
+[gd_scene load_steps=6 format=3 uid="uid://c8vectorchess01"]
 
 [ext_resource type="Script" path="res://scripts/main.gd" id="1_main"]
 [ext_resource type="Script" path="res://scripts/board/vector_board.gd" id="2_board"]
@@ -34,6 +34,22 @@ content_margin_left = 22.0
 content_margin_top = 20.0
 content_margin_right = 22.0
 content_margin_bottom = 20.0
+
+[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_banner"]
+bg_color = Color(0.14, 0.09, 0.03, 0.96)
+border_width_left = 2
+border_width_top = 2
+border_width_right = 2
+border_width_bottom = 2
+border_color = Color(1.0, 0.76, 0.2, 0.9)
+corner_radius_top_left = 6
+corner_radius_top_right = 6
+corner_radius_bottom_right = 6
+corner_radius_bottom_left = 6
+content_margin_left = 14.0
+content_margin_top = 8.0
+content_margin_right = 10.0
+content_margin_bottom = 8.0
 
 [node name="Main" type="Control"]
 layout_mode = 3
@@ -375,6 +391,40 @@ size_flags_horizontal = 3
 disabled = true
 tooltip_text = "Confirm New Game"
 
+[node name="GpuWarningBanner" type="PanelContainer" parent="."]
+unique_name_in_owner = true
+visible = false
+layout_mode = 1
+anchors_preset = 10
+anchor_right = 1.0
+offset_left = 16.0
+offset_top = 12.0
+offset_right = -16.0
+offset_bottom = 52.0
+grow_horizontal = 2
+theme_override_styles/panel = SubResource("StyleBoxFlat_banner")
+
+[node name="BannerHBox" type="HBoxContainer" parent="GpuWarningBanner"]
+layout_mode = 2
+theme_override_constants/separation = 10
+
+[node name="GpuWarningLabel" type="Label" parent="GpuWarningBanner/BannerHBox"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+theme_override_colors/font_color = Color(1, 0.88, 0.55, 1)
+theme_override_font_sizes/font_size = 13
+text = "Software rendering detected. 2D MSAA & line AA disabled — enable Browser Hardware Acceleration for best performance."
+autowrap_mode = 2
+
+[node name="DismissGpuBannerButton" type="Button" parent="GpuWarningBanner/BannerHBox"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(28, 28)
+layout_mode = 2
+size_flags_vertical = 4
+tooltip_text = "Dismiss Warning"
+text = "X"
+
 [connection signal="pressed" from="MarginContainer/MainLayout/SidePanel/VBox/PromotionBox/PromoteGrid/PromoteQueenBtn" to="." method="_on_promote_queen_pressed"]
 [connection signal="pressed" from="MarginContainer/MainLayout/SidePanel/VBox/PromotionBox/PromoteGrid/PromoteRookBtn" to="." method="_on_promote_rook_pressed"]
 [connection signal="pressed" from="MarginContainer/MainLayout/SidePanel/VBox/PromotionBox/PromoteGrid/PromoteBishopBtn" to="." method="_on_promote_bishop_pressed"]
@@ -395,3 +445,4 @@ tooltip_text = "Confirm New Game"
 [connection signal="value_changed" from="NewGameModal/CenterContainer/ModalPanel/ModalVBox/ConfirmSlider" to="." method="_on_confirm_slider_value_changed"]
 [connection signal="pressed" from="NewGameModal/CenterContainer/ModalPanel/ModalVBox/ModalButtons/CancelNewGameButton" to="." method="_on_cancel_new_game_pressed"]
 [connection signal="pressed" from="NewGameModal/CenterContainer/ModalPanel/ModalVBox/ModalButtons/ConfirmNewGameButton" to="." method="_on_confirm_new_game_pressed"]
+[connection signal="pressed" from="GpuWarningBanner/BannerHBox/DismissGpuBannerButton" to="." method="_on_dismiss_gpu_banner_pressed"]

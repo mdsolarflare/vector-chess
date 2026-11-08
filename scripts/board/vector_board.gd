@@ -21,6 +21,8 @@ const COLOR_VECTOR_RAY := Color(0.25, 1.0, 0.65, 0.85)
 const COLOR_CAPTURE_RAY := Color(1.0, 0.32, 0.25, 0.95)
 const COLOR_LAST_MOVE := Color(1.0, 0.82, 0.2, 0.70)
 
+static var line_aa_enabled: bool = true
+
 var rules: GameRules = GameRules.new()
 var selected_piece: PieceData = null
 var legal_moves: Array[GameRules.VectorMove] = []
@@ -37,30 +39,72 @@ var _hex_radius: float = 28.0
 var _pulse_time: float = 0.0
 var _bursts: Array[Dictionary] = []
 var _all_cells: Array[Vector2i] = []
+var _cached_turn_moves: Dictionary = {}
+var _cached_check_kings: Array[PieceData] = []
 
 
 func _ready() -> void:
 	mouse_filter = Control.MOUSE_FILTER_STOP
 	_all_cells = GameRules.get_all_board_cells()
+	_rebuild_board_cache()
 	set_process(true)
 
 
+func set_line_antialiasing(enabled: bool) -> void:
+	line_aa_enabled = enabled
+	queue_redraw()
+
+
+func _rebuild_board_cache() -> void:
+	_cached_turn_moves.clear()
+	_cached_check_kings.clear()
+
+	if not rules.is_game_over:
+		for p in rules.pieces:
+			if p.team == rules.current_turn:
+				_cached_turn_moves[p.id] = rules.get_legal_moves_for_piece(p)
+
+	for team in [PieceData.Team.CYAN, PieceData.Team.MAGENTA]:
+		if rules.is_king_in_check(team):
+			for p in rules.pieces:
+				if p.team == team and p.type == PieceData.Type.KING:
+					_cached_check_kings.append(p)
+
+
+func is_animating() -> bool:
+	if selected_piece != null or not _cached_check_kings.is_empty() or not _bursts.is_empty():
+		return true
+	for p in rules.pieces:
+		if p.visual_pos != Vector2(p.grid_pos):
+			return true
+	return false
+
+
 func _process(delta: float) -> void:
-	_pulse_time += delta
+	var needs_redraw := false
 
 	for p in rules.pieces:
 		var target := Vector2(p.grid_pos)
 		if p.visual_pos.distance_squared_to(target) > 0.0001:
 			p.visual_pos = p.visual_pos.lerp(target, clampf(delta * 16.0, 0.0, 1.0))
-		else:
+			needs_redraw = true
+		elif p.visual_pos != target:
 			p.visual_pos = target
+			needs_redraw = true
 
-	for i in range(_bursts.size() - 1, -1, -1):
-		_bursts[i]["age"] += delta
-		if _bursts[i]["age"] >= _bursts[i]["lifetime"]:
-			_bursts.remove_at(i)
+	if not _bursts.is_empty():
+		needs_redraw = true
+		for i in range(_bursts.size() - 1, -1, -1):
+			_bursts[i]["age"] += delta
+			if _bursts[i]["age"] >= _bursts[i]["lifetime"]:
+				_bursts.remove_at(i)
 
-	queue_redraw()
+	if selected_piece != null or not _cached_check_kings.is_empty():
+		needs_redraw = true
+
+	if needs_redraw:
+		_pulse_time += delta
+		queue_redraw()
 
 
 func start_new_game() -> void:
@@ -71,6 +115,7 @@ func start_new_game() -> void:
 	pending_promotion_move = null
 	input_locked = false
 	_bursts.clear()
+	_rebuild_board_cache()
 	selection_changed.emit(null, null)
 	queue_redraw()
 
@@ -81,6 +126,7 @@ func undo_move() -> bool:
 		selected_piece = null
 		legal_moves.clear()
 		hovered_move = null
+		_rebuild_board_cache()
 		selection_changed.emit(null, null)
 		queue_redraw()
 		return true
@@ -148,7 +194,11 @@ func _handle_cell_interaction(cell: Vector2i) -> void:
 	var clicked_piece := rules.get_piece_at(cell)
 	if clicked_piece != null and clicked_piece.team == rules.current_turn:
 		selected_piece = clicked_piece
-		legal_moves = rules.get_legal_moves_for_piece(selected_piece)
+		if _cached_turn_moves.has(selected_piece.id):
+			var cached: Array[GameRules.VectorMove] = _cached_turn_moves[selected_piece.id]
+			legal_moves = cached
+		else:
+			legal_moves = rules.get_legal_moves_for_piece(selected_piece)
 		_update_hovered_move()
 		selection_changed.emit(selected_piece, hovered_move)
 		queue_redraw()
@@ -169,6 +219,7 @@ func _commit_move(move: GameRules.VectorMove) -> void:
 		selected_piece = null
 		legal_moves.clear()
 		hovered_move = null
+		_rebuild_board_cache()
 		selection_changed.emit(null, null)
 		move_executed.emit(move, notation)
 		queue_redraw()
@@ -206,13 +257,13 @@ func _draw() -> void:
 
 		var outline := poly.duplicate()
 		outline.append(poly[0])
-		draw_polyline(outline, COLOR_GRID_LINE, 1.3, true)
+		draw_polyline(outline, COLOR_GRID_LINE, 1.3, line_aa_enabled)
 
 		# Subtle starting-pawn hex indicator
 		if rules.is_pawn_start_cell(PieceData.Team.CYAN, cell) or rules.is_pawn_start_cell(PieceData.Team.MAGENTA, cell):
 			var inner_hex := _make_hex_polygon(center, _hex_radius * 0.20)
 			inner_hex.append(inner_hex[0])
-			draw_polyline(inner_hex, Color(0.35, 0.5, 0.7, 0.20), 1.0, true)
+			draw_polyline(inner_hex, Color(0.35, 0.5, 0.7, 0.20), 1.0, line_aa_enabled)
 
 	# 2. Draw coordinate labels
 	if show_cell_coords:
@@ -231,7 +282,9 @@ func _draw() -> void:
 	if show_vectors:
 		for p in rules.pieces:
 			if p.team == rules.current_turn:
-				var p_moves := rules.get_legal_moves_for_piece(p)
+				var p_moves: Array = _cached_turn_moves.get(p.id, [])
+				if p_moves.is_empty():
+					continue
 				var team_col := COLOR_CYAN if p.team == PieceData.Team.CYAN else COLOR_MAGENTA
 				var ray_col := Color(team_col.r, team_col.g, team_col.b, 0.24)
 				var origin := _axial_to_screen(p.visual_pos)
@@ -267,18 +320,15 @@ func _draw() -> void:
 		_draw_hex_highlight(h_center, Color(1, 1, 1, 0.04), Color(1, 1, 1, 0.35), 1.6)
 
 	# 7. Highlight King in check
-	for team in [PieceData.Team.CYAN, PieceData.Team.MAGENTA]:
-		if rules.is_king_in_check(team):
-			for p in rules.pieces:
-				if p.team == team and p.type == PieceData.Type.KING:
-					var k_center := _axial_to_screen(Vector2(p.grid_pos))
-					var pulse := 0.5 + 0.5 * sin(_pulse_time * 8.0)
-					_draw_hex_highlight(
-						k_center,
-						Color(1.0, 0.15, 0.15, 0.25 + 0.25 * pulse),
-						Color(1.0, 0.2, 0.2, 0.95),
-						3.0
-					)
+	for king_piece in _cached_check_kings:
+		var k_center := _axial_to_screen(Vector2(king_piece.grid_pos))
+		var pulse := 0.5 + 0.5 * sin(_pulse_time * 8.0)
+		_draw_hex_highlight(
+			k_center,
+			Color(1.0, 0.15, 0.15, 0.25 + 0.25 * pulse),
+			Color(1.0, 0.2, 0.2, 0.95),
+			3.0
+		)
 
 	# 8. Draw all pieces using Option A Low-Poly Faceted Silhouettes
 	for p in rules.pieces:
@@ -294,7 +344,7 @@ func _draw_hex_highlight(center: Vector2, fill_col: Color, border_col: Color, bo
 		draw_colored_polygon(poly, fill_col)
 	var closed := poly.duplicate()
 	closed.append(poly[0])
-	draw_polyline(closed, border_col, border_width, true)
+	draw_polyline(closed, border_col, border_width, line_aa_enabled)
 
 
 func _draw_polygon_piece(piece: PieceData) -> void:
@@ -353,7 +403,7 @@ static func draw_faceted_piece_icon(
 		# Subtle internal origami/crystal facet crease edge
 		var crease := world_poly.duplicate()
 		crease.append(world_poly[0])
-		canvas.draw_polyline(crease, Color(primary.lightened(0.25), 0.35), 1.1, true)
+		canvas.draw_polyline(crease, Color(primary.lightened(0.25), 0.35), 1.1, line_aa_enabled)
 
 	# 2. Draw outer glowing silhouette contour
 	for norm_outline in outlines:
@@ -362,9 +412,9 @@ static func draw_faceted_piece_icon(
 		for i in range(norm_outline.size()):
 			world_outline[i] = center + norm_outline[i] * radius
 
-		canvas.draw_polyline(world_outline, Color(primary, 0.38), 3.6, true)
+		canvas.draw_polyline(world_outline, Color(primary, 0.38), 3.6, line_aa_enabled)
 		var rim_col := Color(1.0, 1.0, 1.0, 0.95) if is_selected else primary.lightened(0.22)
-		canvas.draw_polyline(world_outline, rim_col, 1.7, true)
+		canvas.draw_polyline(world_outline, rim_col, 1.7, line_aa_enabled)
 
 	# 3. Draw bright geometric accents (Knight eye, Bishop cleft slash, Queen crown pearls)
 	var accent_col := Color(1.0, 1.0, 1.0, 0.92)
@@ -373,7 +423,7 @@ static func draw_faceted_piece_icon(
 		world_accent.resize(norm_accent.size())
 		for i in range(norm_accent.size()):
 			world_accent[i] = center + norm_accent[i] * radius
-		canvas.draw_polyline(world_accent, accent_col, 1.6, true)
+		canvas.draw_polyline(world_accent, accent_col, 1.6, line_aa_enabled)
 
 
 func _draw_vector_arrow(from_pt: Vector2, to_pt: Vector2, color: Color, width: float, draw_label: bool) -> void:
@@ -386,7 +436,7 @@ func _draw_vector_arrow(from_pt: Vector2, to_pt: Vector2, color: Color, width: f
 
 	var start_pt := from_pt + dir * (_hex_radius * 0.32)
 	var tip_pt := to_pt - dir * (_hex_radius * 0.25)
-	draw_line(start_pt, tip_pt, color, width, true)
+	draw_line(start_pt, tip_pt, color, width, line_aa_enabled)
 
 	var head_len := clampf(_hex_radius * 0.34, 7.0, 14.0)
 	var head_width := head_len * 0.55
@@ -438,7 +488,7 @@ func _draw_bursts() -> void:
 		col.a = 1.0 - t
 		var poly := _make_hex_polygon(center, r)
 		poly.append(poly[0])
-		draw_polyline(poly, col, 2.5 * (1.0 - t), true)
+		draw_polyline(poly, col, 2.5 * (1.0 - t), line_aa_enabled)
 
 
 func _make_hex_polygon(center: Vector2, radius: float) -> PackedVector2Array:
