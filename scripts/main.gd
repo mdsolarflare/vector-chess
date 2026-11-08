@@ -1,9 +1,10 @@
 extends Control
 ## Main controller for Vector Chess (Glinski's Hexagonal Chess baseline).
 ## Manages responsive cross-platform layout, hexagonal telemetry HUD, pawn promotion UI,
-## and procedural vector icon buttons.
+## procedural vector icon buttons, and the slide-to-unlock New Game confirmation modal.
 
 const SHADE_NAMES: Array[String] = ["Dark", "Mid", "Light"]
+const SLIDER_UNLOCK_THRESHOLD: float = 98.0
 
 @onready var split_container: BoxContainer = %MainLayout
 @onready var vector_board: VectorBoard = %VectorBoard
@@ -19,6 +20,12 @@ const SHADE_NAMES: Array[String] = ["Dark", "Mid", "Light"]
 @onready var flip_button: Button = %FlipButton
 @onready var vectors_button: Button = %VectorsButton
 
+@onready var new_game_modal: ColorRect = %NewGameModal
+@onready var confirm_slider: HSlider = %ConfirmSlider
+@onready var slider_hint_label: Label = %SliderHintLabel
+@onready var cancel_new_game_button: Button = %CancelNewGameButton
+@onready var confirm_new_game_button: Button = %ConfirmNewGameButton
+
 
 func _ready() -> void:
 	vector_board.move_executed.connect(_on_move_executed)
@@ -30,6 +37,8 @@ func _ready() -> void:
 	undo_button.draw.connect(_on_undo_button_draw)
 	flip_button.draw.connect(_on_flip_button_draw)
 	vectors_button.draw.connect(_on_vectors_button_draw)
+	cancel_new_game_button.draw.connect(_on_cancel_new_game_button_draw)
+	confirm_new_game_button.draw.connect(_on_confirm_new_game_button_draw)
 
 	get_viewport().size_changed.connect(_on_viewport_size_changed)
 	_on_viewport_size_changed()
@@ -169,7 +178,6 @@ func _on_undo_button_draw() -> void:
 	var alpha := 0.32 if btn.disabled else 0.95
 	var col := Color(0.82, 0.92, 1.0, alpha)
 
-	# Top horizontal shaft + right semicircular U-turn + bottom return tail
 	var arc_center := c + Vector2(3.5, 1.5)
 	var arc_r := 6.5
 	var top_y := arc_center.y - arc_r
@@ -186,7 +194,6 @@ func _on_undo_button_draw() -> void:
 
 	btn.draw_polyline(path, col, 2.0, true)
 
-	# Left-pointing arrowhead at (left_x, top_y)
 	var tip := Vector2(left_x - 1.0, top_y)
 	var head := PackedVector2Array([
 		tip + Vector2(5.5, -4.5),
@@ -204,7 +211,6 @@ func _on_flip_button_draw() -> void:
 	var up_col := VectorBoard.COLOR_MAGENTA if flipped else VectorBoard.COLOR_CYAN
 	var down_col := VectorBoard.COLOR_CYAN if flipped else VectorBoard.COLOR_MAGENTA
 
-	# Left arrow pointing UP
 	var lx := c.x - 5.0
 	var top_y := c.y - 9.5
 	var bot_y := c.y + 9.5
@@ -216,7 +222,6 @@ func _on_flip_button_draw() -> void:
 	])
 	btn.draw_polyline(up_head, up_col, 2.0, true)
 
-	# Right arrow pointing DOWN
 	var rx := c.x + 5.0
 	btn.draw_line(Vector2(rx, top_y), Vector2(rx, bot_y), down_col, 2.0, true)
 	var down_head := PackedVector2Array([
@@ -241,7 +246,6 @@ func _on_vectors_button_draw() -> void:
 	var ray_col := Color(0.25, 1.0, 0.65, 0.98) if active else Color(0.55, 0.65, 0.78, 0.42)
 	var origin := c + Vector2(-8.0, 7.5)
 
-	# 3 fanning vector rays at -75 deg, -45 deg, -15 deg
 	var angles := [-deg_to_rad(75.0), -deg_to_rad(45.0), -deg_to_rad(15.0)]
 	var lengths := [17.0, 19.5, 17.0]
 	for i in range(3):
@@ -259,9 +263,40 @@ func _on_vectors_button_draw() -> void:
 		])
 		btn.draw_colored_polygon(head, ray_col)
 
-	# Origin vertex node
 	var node_col := Color(1.0, 1.0, 1.0, 0.95) if active else ray_col
 	btn.draw_circle(origin, 2.8, node_col)
+
+
+## Draws a red 'X' icon on the New Game modal Cancel button.
+func _on_cancel_new_game_button_draw() -> void:
+	var btn := cancel_new_game_button
+	var c := btn.size * 0.5
+	var red_col := Color(1.0, 0.30, 0.34, 0.95)
+
+	var inner_rect := Rect2(Vector2(3, 3), btn.size - Vector2(6, 6))
+	btn.draw_rect(inner_rect, Color(1.0, 0.25, 0.30, 0.12), true)
+	btn.draw_rect(inner_rect, Color(1.0, 0.30, 0.34, 0.48), false, 1.3)
+
+	var arm := 6.8
+	btn.draw_line(c + Vector2(-arm, -arm), c + Vector2(arm, arm), red_col, 2.4, true)
+	btn.draw_line(c + Vector2(-arm, arm), c + Vector2(arm, -arm), red_col, 2.4, true)
+
+
+## Draws a green '+' icon on the New Game modal Confirm button (dimmed until unlocked).
+func _on_confirm_new_game_button_draw() -> void:
+	var btn := confirm_new_game_button
+	var c := btn.size * 0.5
+	var unlocked := not btn.disabled
+
+	if unlocked:
+		var inner_rect := Rect2(Vector2(3, 3), btn.size - Vector2(6, 6))
+		btn.draw_rect(inner_rect, Color(0.20, 1.0, 0.55, 0.16), true)
+		btn.draw_rect(inner_rect, Color(0.25, 1.0, 0.60, 0.68), false, 1.5)
+
+	var green_col := Color(0.25, 1.0, 0.60, 0.98) if unlocked else Color(0.25, 1.0, 0.60, 0.26)
+	var arm := 7.5
+	btn.draw_line(c + Vector2(-arm, 0), c + Vector2(arm, 0), green_col, 2.6, true)
+	btn.draw_line(c + Vector2(0, -arm), c + Vector2(0, arm), green_col, 2.6, true)
 
 
 func _on_move_executed(_move: GameRules.VectorMove, _notation: String) -> void:
@@ -344,6 +379,53 @@ func _update_history() -> void:
 
 
 func _on_new_game_pressed() -> void:
+	_open_new_game_modal()
+
+
+func _open_new_game_modal() -> void:
+	confirm_slider.value = 0.0
+	_update_new_game_modal_state(0.0)
+	new_game_modal.visible = true
+
+
+func _on_cancel_new_game_pressed() -> void:
+	new_game_modal.visible = false
+	confirm_slider.value = 0.0
+
+
+func _on_confirm_slider_value_changed(val: float) -> void:
+	_update_new_game_modal_state(val)
+
+
+func _on_confirm_slider_drag_ended(_value_changed: bool) -> void:
+	if confirm_slider.value < SLIDER_UNLOCK_THRESHOLD:
+		confirm_slider.value = 0.0
+		_update_new_game_modal_state(0.0)
+	else:
+		confirm_slider.value = 100.0
+		_update_new_game_modal_state(100.0)
+
+
+func _update_new_game_modal_state(val: float) -> void:
+	var unlocked := val >= SLIDER_UNLOCK_THRESHOLD
+	confirm_new_game_button.disabled = not unlocked
+	cancel_new_game_button.text = ""
+	confirm_new_game_button.text = ""
+	cancel_new_game_button.queue_redraw()
+	confirm_new_game_button.queue_redraw()
+
+	if unlocked:
+		slider_hint_label.text = "Unlocked - Press + to Reset"
+		slider_hint_label.modulate = Color(0.25, 1.0, 0.65, 1.0)
+	else:
+		slider_hint_label.text = "Slide all the way right to unlock >>"
+		slider_hint_label.modulate = Color(0.65, 0.78, 0.95, 0.9)
+
+
+func _on_confirm_new_game_pressed() -> void:
+	if confirm_slider.value < SLIDER_UNLOCK_THRESHOLD:
+		return
+	new_game_modal.visible = false
 	promotion_box.visible = false
 	vector_board.start_new_game()
 	_refresh_hud()
