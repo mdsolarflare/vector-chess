@@ -26,6 +26,19 @@ class VectorMove extends RefCounted:
 		delta = p_to - p_from
 		captured_pos = p_to
 
+	func duplicate_move() -> VectorMove:
+		var copy := VectorMove.new(piece_id, from, to)
+		copy.is_capture = is_capture
+		copy.is_en_passant = is_en_passant
+		copy.captured_piece_id = captured_piece_id
+		copy.captured_pos = captured_pos
+		copy.is_double_step = is_double_step
+		copy.en_passant_target = en_passant_target
+		copy.is_promotion = is_promotion
+		copy.promotion_type = promotion_type
+		copy.ray_steps = ray_steps.duplicate()
+		return copy
+
 	## Returns the 2D Euclidean displacement vector in screen-normalized hex units (Right = +X, Up = +Y).
 	func get_cartesian_vector() -> Vector2:
 		var dx := 1.5 * float(delta.x)
@@ -174,6 +187,96 @@ func _spawn_piece(team: PieceData.Team, type: PieceData.Type, pos: Vector2i) -> 
 	_next_id += 1
 	pieces.append(p)
 	return p
+
+
+## Creates an isolated copy of the current game state for AI search.
+func clone_state() -> GameRules:
+	var copy := GameRules.new()
+	copy.pieces = _clone_pieces_array()
+	copy.current_turn = current_turn
+	copy.en_passant_target = en_passant_target
+	copy.en_passant_pawn_id = en_passant_pawn_id
+	copy.captured_by_cyan = captured_by_cyan.duplicate()
+	copy.captured_by_magenta = captured_by_magenta.duplicate()
+	copy.is_game_over = is_game_over
+	copy.status_text = status_text
+	copy.last_move = last_move.duplicate_move() if last_move != null else null
+	copy._next_id = _next_id
+	return copy
+
+
+## Returns all legal moves for all pieces belonging to `team`.
+func get_all_legal_moves(team: PieceData.Team) -> Array[VectorMove]:
+	var all_moves: Array[VectorMove] = []
+	if is_game_over:
+		return all_moves
+	# Iterate over a shallow copy of pieces so in-place check tests remain safe
+	var snapshot_pieces := pieces.duplicate()
+	for p in snapshot_pieces:
+		if p.team == team:
+			all_moves.append_array(get_legal_moves_for_piece(p))
+	return all_moves
+
+
+## Fast in-place move execution for AI search tree traversal (no string formatting or full array cloning).
+func push_search_move(move: VectorMove) -> Dictionary:
+	var piece := get_piece_by_id(move.piece_id)
+	var target: PieceData = null
+	if move.is_en_passant:
+		target = get_piece_by_id(move.captured_piece_id)
+		if target == null:
+			target = get_piece_at(move.captured_pos)
+	elif move.is_capture:
+		target = get_piece_at(move.to)
+
+	var undo_record := {
+		"piece": piece,
+		"old_pos": piece.grid_pos,
+		"old_type": piece.type,
+		"old_sides": piece.sides_count,
+		"old_has_moved": piece.has_moved,
+		"captured": target,
+		"old_turn": current_turn,
+		"old_ep_target": en_passant_target,
+		"old_ep_pawn_id": en_passant_pawn_id,
+	}
+
+	if target != null:
+		pieces.erase(target)
+
+	piece.grid_pos = move.to
+	piece.has_moved = true
+
+	if move.is_promotion:
+		piece.type = move.promotion_type
+		piece.sides_count = PieceData.get_polygon_sides(move.promotion_type)
+
+	if move.is_double_step:
+		en_passant_target = move.en_passant_target
+		en_passant_pawn_id = piece.id
+	else:
+		en_passant_target = INVALID_HEX
+		en_passant_pawn_id = -1
+
+	current_turn = PieceData.Team.MAGENTA if current_turn == PieceData.Team.CYAN else PieceData.Team.CYAN
+	return undo_record
+
+
+## Reverts a move previously applied with `push_search_move()`.
+func pop_search_move(undo_record: Dictionary) -> void:
+	var piece: PieceData = undo_record["piece"]
+	piece.grid_pos = undo_record["old_pos"]
+	piece.type = undo_record["old_type"]
+	piece.sides_count = undo_record["old_sides"]
+	piece.has_moved = undo_record["old_has_moved"]
+
+	var captured: PieceData = undo_record["captured"]
+	if captured != null:
+		pieces.append(captured)
+
+	current_turn = undo_record["old_turn"]
+	en_passant_target = undo_record["old_ep_target"]
+	en_passant_pawn_id = undo_record["old_ep_pawn_id"]
 
 
 ## Returns all 91 valid axial hex coordinates on the board.

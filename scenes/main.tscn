@@ -85,6 +85,7 @@ theme_override_font_sizes/font_size = 24
 text = "VECTOR CHESS"
 
 [node name="SubtitleLabel" type="Label" parent="MarginContainer/MainLayout/SidePanel/VBox"]
+unique_name_in_owner = true
 layout_mode = 2
 theme_override_colors/font_color = Color(0.55, 0.68, 0.85, 1)
 theme_override_font_sizes/font_size = 13
@@ -231,27 +232,115 @@ grow_horizontal = 2
 grow_vertical = 2
 
 [node name="ModalPanel" type="PanelContainer" parent="NewGameModal/CenterContainer"]
-custom_minimum_size = Vector2(360, 0)
+custom_minimum_size = Vector2(380, 0)
 layout_mode = 2
 theme_override_styles/panel = SubResource("StyleBoxFlat_modal")
 
 [node name="ModalVBox" type="VBoxContainer" parent="NewGameModal/CenterContainer/ModalPanel"]
 layout_mode = 2
-theme_override_constants/separation = 14
+theme_override_constants/separation = 12
 
 [node name="ModalTitle" type="Label" parent="NewGameModal/CenterContainer/ModalPanel/ModalVBox"]
 layout_mode = 2
 theme_override_colors/font_color = Color(0.95, 0.98, 1, 1)
 theme_override_font_sizes/font_size = 20
-text = "START NEW GAME?"
+text = "NEW GAME SETUP"
 horizontal_alignment = 1
 
 [node name="ModalDescription" type="Label" parent="NewGameModal/CenterContainer/ModalPanel/ModalVBox"]
+unique_name_in_owner = true
 layout_mode = 2
 theme_override_colors/font_color = Color(0.65, 0.76, 0.9, 1)
 theme_override_font_sizes/font_size = 13
-text = "Current board progress will be reset."
+text = "Configure match mode and side."
 horizontal_alignment = 1
+
+[node name="ModeLabel" type="Label" parent="NewGameModal/CenterContainer/ModalPanel/ModalVBox"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.62, 0.75, 0.92, 1)
+theme_override_font_sizes/font_size = 12
+text = "GAME MODE"
+
+[node name="ModeButtons" type="HBoxContainer" parent="NewGameModal/CenterContainer/ModalPanel/ModalVBox"]
+layout_mode = 2
+theme_override_constants/separation = 8
+
+[node name="Mode1PButton" type="Button" parent="NewGameModal/CenterContainer/ModalPanel/ModalVBox/ModeButtons"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(0, 38)
+layout_mode = 2
+size_flags_horizontal = 3
+text = "1P vs CPU"
+
+[node name="Mode2PButton" type="Button" parent="NewGameModal/CenterContainer/ModalPanel/ModalVBox/ModeButtons"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(0, 38)
+layout_mode = 2
+size_flags_horizontal = 3
+text = "2P Pass & Play"
+
+[node name="CpuOptionsBox" type="VBoxContainer" parent="NewGameModal/CenterContainer/ModalPanel/ModalVBox"]
+unique_name_in_owner = true
+layout_mode = 2
+theme_override_constants/separation = 10
+
+[node name="ColorLabel" type="Label" parent="NewGameModal/CenterContainer/ModalPanel/ModalVBox/CpuOptionsBox"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.62, 0.75, 0.92, 1)
+theme_override_font_sizes/font_size = 12
+text = "PLAYER COLOR & TURN ORDER"
+
+[node name="ColorButtons" type="HBoxContainer" parent="NewGameModal/CenterContainer/ModalPanel/ModalVBox/CpuOptionsBox"]
+layout_mode = 2
+theme_override_constants/separation = 8
+
+[node name="ColorCyanButton" type="Button" parent="NewGameModal/CenterContainer/ModalPanel/ModalVBox/CpuOptionsBox/ColorButtons"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(0, 44)
+layout_mode = 2
+size_flags_horizontal = 3
+tooltip_text = "Play as Cyan (#1 - Moves First)"
+
+[node name="ColorMagentaButton" type="Button" parent="NewGameModal/CenterContainer/ModalPanel/ModalVBox/CpuOptionsBox/ColorButtons"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(0, 44)
+layout_mode = 2
+size_flags_horizontal = 3
+tooltip_text = "Play as Magenta (#2 - Moves Second)"
+
+[node name="DifficultyLabel" type="Label" parent="NewGameModal/CenterContainer/ModalPanel/ModalVBox/CpuOptionsBox"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.62, 0.75, 0.92, 1)
+theme_override_font_sizes/font_size = 12
+text = "CPU DIFFICULTY"
+
+[node name="DifficultyButtons" type="HBoxContainer" parent="NewGameModal/CenterContainer/ModalPanel/ModalVBox/CpuOptionsBox"]
+layout_mode = 2
+theme_override_constants/separation = 8
+
+[node name="DiffEasyButton" type="Button" parent="NewGameModal/CenterContainer/ModalPanel/ModalVBox/CpuOptionsBox/DifficultyButtons"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(0, 36)
+layout_mode = 2
+size_flags_horizontal = 3
+text = "Easy"
+
+[node name="DiffMedButton" type="Button" parent="NewGameModal/CenterContainer/ModalPanel/ModalVBox/CpuOptionsBox/DifficultyButtons"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(0, 36)
+layout_mode = 2
+size_flags_horizontal = 3
+text = "Medium"
+
+[node name="DiffHardButton" type="Button" parent="NewGameModal/CenterContainer/ModalPanel/ModalVBox/CpuOptionsBox/DifficultyButtons"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(0, 36)
+layout_mode = 2
+size_flags_horizontal = 3
+text = "Hard"
+
+[node name="ModalSep" type="HSeparator" parent="NewGameModal/CenterContainer/ModalPanel/ModalVBox"]
+layout_mode = 2
 
 [node name="SliderHintLabel" type="Label" parent="NewGameModal/CenterContainer/ModalPanel/ModalVBox"]
 unique_name_in_owner = true
@@ -295,6 +384,13 @@ tooltip_text = "Confirm New Game"
 [connection signal="pressed" from="MarginContainer/MainLayout/SidePanel/VBox/ControlsGrid/FlipButton" to="." method="_on_flip_pressed"]
 [connection signal="pressed" from="MarginContainer/MainLayout/SidePanel/VBox/ControlsGrid/VectorsButton" to="." method="_on_vectors_pressed"]
 [connection signal="pressed" from="TogglePanelButton" to="." method="_on_toggle_panel_pressed"]
+[connection signal="pressed" from="NewGameModal/CenterContainer/ModalPanel/ModalVBox/ModeButtons/Mode1PButton" to="." method="_on_mode_1p_pressed"]
+[connection signal="pressed" from="NewGameModal/CenterContainer/ModalPanel/ModalVBox/ModeButtons/Mode2PButton" to="." method="_on_mode_2p_pressed"]
+[connection signal="pressed" from="NewGameModal/CenterContainer/ModalPanel/ModalVBox/CpuOptionsBox/ColorButtons/ColorCyanButton" to="." method="_on_color_cyan_pressed"]
+[connection signal="pressed" from="NewGameModal/CenterContainer/ModalPanel/ModalVBox/CpuOptionsBox/ColorButtons/ColorMagentaButton" to="." method="_on_color_magenta_pressed"]
+[connection signal="pressed" from="NewGameModal/CenterContainer/ModalPanel/ModalVBox/CpuOptionsBox/DifficultyButtons/DiffEasyButton" to="." method="_on_diff_easy_pressed"]
+[connection signal="pressed" from="NewGameModal/CenterContainer/ModalPanel/ModalVBox/CpuOptionsBox/DifficultyButtons/DiffMedButton" to="." method="_on_diff_med_pressed"]
+[connection signal="pressed" from="NewGameModal/CenterContainer/ModalPanel/ModalVBox/CpuOptionsBox/DifficultyButtons/DiffHardButton" to="." method="_on_diff_hard_pressed"]
 [connection signal="drag_ended" from="NewGameModal/CenterContainer/ModalPanel/ModalVBox/ConfirmSlider" to="." method="_on_confirm_slider_drag_ended"]
 [connection signal="value_changed" from="NewGameModal/CenterContainer/ModalPanel/ModalVBox/ConfirmSlider" to="." method="_on_confirm_slider_value_changed"]
 [connection signal="pressed" from="NewGameModal/CenterContainer/ModalPanel/ModalVBox/ModalButtons/CancelNewGameButton" to="." method="_on_cancel_new_game_pressed"]

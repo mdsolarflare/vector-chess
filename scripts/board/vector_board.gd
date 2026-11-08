@@ -30,6 +30,7 @@ var pending_promotion_move: GameRules.VectorMove = null
 var board_flipped: bool = false
 var show_vectors: bool = true
 var show_cell_coords: bool = true
+var input_locked: bool = false
 
 var _board_center: Vector2 = Vector2.ZERO
 var _hex_radius: float = 28.0
@@ -68,6 +69,7 @@ func start_new_game() -> void:
 	legal_moves.clear()
 	hovered_move = null
 	pending_promotion_move = null
+	input_locked = false
 	_bursts.clear()
 	selection_changed.emit(null, null)
 	queue_redraw()
@@ -83,6 +85,13 @@ func undo_move() -> bool:
 		queue_redraw()
 		return true
 	return false
+
+
+func execute_ai_move(move: GameRules.VectorMove) -> void:
+	if move == null or rules.is_game_over:
+		return
+	pending_promotion_move = null
+	_commit_move(move)
 
 
 func toggle_flip_board() -> void:
@@ -106,7 +115,7 @@ func complete_promotion(chosen_type: PieceData.Type) -> void:
 
 
 func _gui_input(event: InputEvent) -> void:
-	if pending_promotion_move != null:
+	if pending_promotion_move != null or input_locked:
 		return
 
 	if event is InputEventMouseMotion:
