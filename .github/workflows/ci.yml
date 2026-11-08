@@ -1,0 +1,79 @@
+name: Godot CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  GODOT_VERSION: "4.3"
+  EXPORT_NAME: "VectorChess"
+
+jobs:
+  test-and-validate:
+    name: Headless Import & Unit Tests
+    runs-on: ubuntu-latest
+    container:
+      image: barichello/godot-ci:4.3
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Import Project Resources Headlessly
+        run: |
+          godot --headless --import
+
+      - name: Run Headless Unit Test Suite
+        run: |
+          godot --headless -s res://tests/test_rules.gd
+
+  export-builds:
+    name: Export Desktop & Web Builds
+    needs: test-and-validate
+    runs-on: ubuntu-latest
+    container:
+      image: barichello/godot-ci:4.3
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Export Templates
+        run: |
+          mkdir -p ~/.local/share/godot/export_templates/${GODOT_VERSION}.stable
+          cp -r /root/.local/share/godot/export_templates/${GODOT_VERSION}.stable/* ~/.local/share/godot/export_templates/${GODOT_VERSION}.stable/ || true
+
+      - name: Import Project
+        run: |
+          godot --headless --import
+
+      - name: Export Windows Desktop
+        run: |
+          mkdir -p build/windows
+          godot --headless --export-release "Windows Desktop" "build/windows/${EXPORT_NAME}.exe"
+          test -f "build/windows/${EXPORT_NAME}.exe"
+
+      - name: Export Linux Desktop
+        run: |
+          mkdir -p build/linux
+          godot --headless --export-release "Linux" "build/linux/${EXPORT_NAME}.x86_64"
+          test -f "build/linux/${EXPORT_NAME}.x86_64"
+
+      - name: Export macOS (Universal App Bundle Zip)
+        run: |
+          mkdir -p build/macos
+          godot --headless --export-release "macOS" "build/macos/${EXPORT_NAME}.zip"
+          test -f "build/macos/${EXPORT_NAME}.zip"
+
+      - name: Export Web (HTML5 / WebAssembly)
+        run: |
+          mkdir -p build/web
+          godot --headless --export-release "Web" "build/web/index.html"
+          test -f "build/web/index.html"
+
+      - name: Upload Build Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: vector-chess-builds
+          path: build/
+          if-no-files-found: error
