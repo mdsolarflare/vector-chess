@@ -1,6 +1,7 @@
 extends SceneTree
-## Headless unit test runner for Vector Chess (Glinski's Hexagonal Chess).
-## Run with: godot --headless -s res://tests/test_rules.gd
+## Headless unit test runner for Vector Chess (Glinski's Hexagonal Chess).\n\n## Run with: godot --headless -s res://tests/test_rules.gd
+
+const MainScript = preload("res://scripts/main.gd")
 
 var _tests_run: int = 0
 var _tests_failed: int = 0
@@ -18,6 +19,8 @@ func _init() -> void:
 	_test_search_push_pop_consistency()
 	_test_piece_faceted_meshes()
 	_test_ai_player_move_selection()
+	_test_software_renderer_detection()
+	_test_vector_board_caching_and_idle_redraw()
 
 	print("========================================")
 	print("Tests run: %d | Failed: %d" % [_tests_run, _tests_failed])
@@ -243,3 +246,87 @@ func _test_ai_player_move_selection() -> void:
 	var med_mv := ai.choose_move(rules, PieceData.Team.CYAN, AIPlayer.Difficulty.MEDIUM)
 	_assert(easy_mv != null, "AIPlayer (Easy) selects a valid opening move")
 	_assert(med_mv != null, "AIPlayer (Medium) selects a valid opening move")
+
+
+func _test_software_renderer_detection() -> void:
+	print("\n-- Software Renderer Detection & Fallback --")
+	_assert(
+		MainScript.is_software_renderer("ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (Subzero)))"),
+		"Detects Google SwiftShader software WebGL adapter"
+	)
+	_assert(
+		MainScript.is_software_renderer("llvmpipe (LLVM 15.0.7, 256 bits)"),
+		"Detects Mesa llvmpipe software adapter"
+	)
+	_assert(
+		MainScript.is_software_renderer("Microsoft Basic Render Driver"),
+		"Detects Microsoft Basic Render Driver fallback"
+	)
+	_assert(
+		not MainScript.is_software_renderer("ANGLE (NVIDIA, NVIDIA GeForce RTX 4070 Direct3D11)"),
+		"Does not false-positive on hardware GPU adapter"
+	)
+
+
+func _test_vector_board_caching_and_idle_redraw() -> void:
+	print("\n-- VectorBoard Move Caching & Idle Animation State --")
+	var board := VectorBoard.new()
+	board._rebuild_board_cache()
+
+	_assert(
+		board._cached_turn_moves.size() == 18,
+		"VectorBoard caches legal moves for all 18 active-turn pieces on startup"
+	)
+	_assert(
+		board._cached_check_kings.is_empty(),
+		"VectorBoard check cache is empty at initial position"
+	)
+	_assert(
+		not board.is_animating(),
+		"VectorBoard is not animating when idle at initial position"
+	)
+
+	var pulse_before := board._pulse_time
+	board._process(0.016)
+	_assert(
+		board._pulse_time == pulse_before,
+		"VectorBoard._process does not advance pulse or redraw when board is idle"
+	)
+
+	# Select a piece via cell interaction and verify cached moves are used and pulse activates
+	var cyan_pawn_cell := GameRules.algebraic_to_axial("f5")
+	board._handle_cell_interaction(cyan_pawn_cell)
+	_assert(
+		board.selected_piece != null and not board.legal_moves.is_empty(),
+		"Selecting a piece populates legal_moves from cache"
+	)
+	_assert(
+		board.is_animating(),
+		"VectorBoard is_animating() is true while a piece is selected"
+	)
+	board._process(0.016)
+	_assert(
+		board._pulse_time > pulse_before,
+		"VectorBoard._process advances pulse and redraws while a piece is selected"
+	)
+
+	# Execute a move and verify cache updates to Magenta's turn and piece interpolation animates
+	var first_mv: GameRules.VectorMove = board.legal_moves[0]
+	board._commit_move(first_mv)
+	_assert(
+		board.rules.current_turn == PieceData.Team.MAGENTA,
+		"Move commit advances turn to Magenta"
+	)
+	var all_magenta_cached := board._cached_turn_moves.size() == 18
+	for p in board.rules.pieces:
+		if p.team == PieceData.Team.MAGENTA and not board._cached_turn_moves.has(p.id):
+			all_magenta_cached = false
+	_assert(
+		all_magenta_cached,
+		"Move commit rebuilds cache for all 18 Magenta pieces"
+	)
+	_assert(
+		board.is_animating(),
+		"VectorBoard is_animating() is true while moved piece interpolates to target hex"
+	)
+	board.free()
