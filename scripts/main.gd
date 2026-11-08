@@ -1,13 +1,15 @@
 extends Control
 ## Main controller for Vector Chess (Glinski's Hexagonal Chess baseline).
 ## Manages responsive cross-platform layout, hexagonal telemetry HUD, pawn promotion UI,
-## procedural vector icon buttons, and the slide-to-unlock New Game confirmation modal.
+## procedural vector icon buttons, single-player CPU orchestration, and the New Game Setup modal.
 
 const SHADE_NAMES: Array[String] = ["Dark", "Mid", "Light"]
 const SLIDER_UNLOCK_THRESHOLD: float = 98.0
+const AI_THINK_DELAY_SEC: float = 0.35
 
 @onready var split_container: BoxContainer = %MainLayout
 @onready var vector_board: VectorBoard = %VectorBoard
+@onready var subtitle_label: Label = %SubtitleLabel
 @onready var status_label: Label = %StatusLabel
 @onready var telemetry_label: RichTextLabel = %TelemetryLabel
 @onready var history_label: RichTextLabel = %HistoryLabel
@@ -21,10 +23,35 @@ const SLIDER_UNLOCK_THRESHOLD: float = 98.0
 @onready var vectors_button: Button = %VectorsButton
 
 @onready var new_game_modal: ColorRect = %NewGameModal
+@onready var modal_description: Label = %ModalDescription
+@onready var mode_1p_button: Button = %Mode1PButton
+@onready var mode_2p_button: Button = %Mode2PButton
+@onready var cpu_options_box: VBoxContainer = %CpuOptionsBox
+@onready var color_cyan_button: Button = %ColorCyanButton
+@onready var color_magenta_button: Button = %ColorMagentaButton
+@onready var diff_easy_button: Button = %DiffEasyButton
+@onready var diff_med_button: Button = %DiffMedButton
+@onready var diff_hard_button: Button = %DiffHardButton
 @onready var confirm_slider: HSlider = %ConfirmSlider
 @onready var slider_hint_label: Label = %SliderHintLabel
 @onready var cancel_new_game_button: Button = %CancelNewGameButton
 @onready var confirm_new_game_button: Button = %ConfirmNewGameButton
+
+## Active match settings
+var is_single_player: bool = true
+var human_team: PieceData.Team = PieceData.Team.CYAN
+var ai_difficulty: AIPlayer.Difficulty = AIPlayer.Difficulty.MEDIUM
+var ai_player: AIPlayer = AIPlayer.new()
+
+## Pending modal configuration (applied when confirming New Game)
+var _pending_single_player: bool = true
+var _pending_human_team: PieceData.Team = PieceData.Team.CYAN
+var _pending_difficulty: AIPlayer.Difficulty = AIPlayer.Difficulty.MEDIUM
+var _is_initial_startup: bool = true
+
+## Async AI turn state
+var _ai_thinking: bool = false
+var _ai_session_id: int = 0
 
 
 func _ready() -> void:
@@ -40,11 +67,22 @@ func _ready() -> void:
 	cancel_new_game_button.draw.connect(_on_cancel_new_game_button_draw)
 	confirm_new_game_button.draw.connect(_on_confirm_new_game_button_draw)
 
+	mode_1p_button.draw.connect(_on_mode_1p_button_draw)
+	mode_2p_button.draw.connect(_on_mode_2p_button_draw)
+	color_cyan_button.draw.connect(_on_color_cyan_button_draw)
+	color_magenta_button.draw.connect(_on_color_magenta_button_draw)
+	diff_easy_button.draw.connect(_on_diff_easy_button_draw)
+	diff_med_button.draw.connect(_on_diff_med_button_draw)
+	diff_hard_button.draw.connect(_on_diff_hard_button_draw)
+
 	get_viewport().size_changed.connect(_on_viewport_size_changed)
 	_on_viewport_size_changed()
 	_update_toggle_panel_button()
 	_update_control_buttons()
 	_refresh_hud()
+
+	# Default startup mode: open in the New Game Setup modal
+	_open_new_game_modal(true)
 
 
 func _on_viewport_size_changed() -> void:
@@ -80,7 +118,7 @@ func _update_toggle_panel_button() -> void:
 func _update_control_buttons() -> void:
 	if new_game_button != null:
 		new_game_button.text = ""
-		new_game_button.tooltip_text = "New Game"
+		new_game_button.tooltip_text = "New Game Setup"
 		new_game_button.queue_redraw()
 
 	if undo_button != null and vector_board != null:
@@ -267,15 +305,167 @@ func _on_vectors_button_draw() -> void:
 	btn.draw_circle(origin, 2.8, node_col)
 
 
+## Draws active highlight border on Mode 1P button.
+func _on_mode_1p_button_draw() -> void:
+	_draw_option_button_highlight(mode_1p_button, _pending_single_player, VectorBoard.COLOR_CYAN)
+
+
+## Draws active highlight border on Mode 2P button.
+func _on_mode_2p_button_draw() -> void:
+	_draw_option_button_highlight(mode_2p_button, not _pending_single_player, VectorBoard.COLOR_CYAN)
+
+
+## Draws Player Color & Turn Order button for Cyan (#1 - First, in Cyan).
+func _on_color_cyan_button_draw() -> void:
+	_draw_team_order_button(
+		color_cyan_button,
+		PieceData.Team.CYAN,
+		"1",
+		"CYAN",
+		"1ST TURN",
+		_pending_human_team == PieceData.Team.CYAN
+	)
+
+
+## Draws Player Color & Turn Order button for Magenta (#2 - Second, in Magenta).
+func _on_color_magenta_button_draw() -> void:
+	_draw_team_order_button(
+		color_magenta_button,
+		PieceData.Team.MAGENTA,
+		"2",
+		"MAGENTA",
+		"2ND TURN",
+		_pending_human_team == PieceData.Team.MAGENTA
+	)
+
+
+func _on_diff_easy_button_draw() -> void:
+	_draw_option_button_highlight(
+		diff_easy_button,
+		_pending_difficulty == AIPlayer.Difficulty.EASY,
+		Color(0.25, 1.0, 0.65, 1.0)
+	)
+
+
+func _on_diff_med_button_draw() -> void:
+	_draw_option_button_highlight(
+		diff_med_button,
+		_pending_difficulty == AIPlayer.Difficulty.MEDIUM,
+		VectorBoard.COLOR_CYAN
+	)
+
+
+func _on_diff_hard_button_draw() -> void:
+	_draw_option_button_highlight(
+		diff_hard_button,
+		_pending_difficulty == AIPlayer.Difficulty.HARD,
+		VectorBoard.COLOR_MAGENTA
+	)
+
+
+func _draw_option_button_highlight(btn: Button, is_selected: bool, accent_col: Color) -> void:
+	if btn == null:
+		return
+	var inner_rect := Rect2(Vector2(2, 2), btn.size - Vector2(4, 4))
+	if is_selected:
+		btn.draw_rect(inner_rect, Color(accent_col.r, accent_col.g, accent_col.b, 0.18), true)
+		btn.draw_rect(inner_rect, Color(accent_col.r, accent_col.g, accent_col.b, 0.90), false, 1.8)
+	else:
+		btn.draw_rect(inner_rect, Color(0.45, 0.55, 0.70, 0.25), false, 1.0)
+
+
+## Custom procedural renderer for the Color & Turn Order selector buttons.
+## Renders a colored hex badge with the turn order number ("1" or "2") in the team's color,
+## along with a mini faceted Pawn silhouette and team/order label in matching team color.
+func _draw_team_order_button(
+	btn: Button,
+	team: PieceData.Team,
+	order_num_str: String,
+	team_label: String,
+	order_sub_label: String,
+	is_selected: bool
+) -> void:
+	if btn == null:
+		return
+	btn.text = ""
+	var team_col := VectorBoard.COLOR_CYAN if team == PieceData.Team.CYAN else VectorBoard.COLOR_MAGENTA
+	var inner_rect := Rect2(Vector2(2, 2), btn.size - Vector2(4, 4))
+
+	if is_selected:
+		btn.draw_rect(inner_rect, Color(team_col.r, team_col.g, team_col.b, 0.18), true)
+		btn.draw_rect(inner_rect, Color(team_col.r, team_col.g, team_col.b, 0.95), false, 2.0)
+	else:
+		btn.draw_rect(inner_rect, Color(team_col.r, team_col.g, team_col.b, 0.04), true)
+		btn.draw_rect(inner_rect, Color(team_col.r, team_col.g, team_col.b, 0.32), false, 1.1)
+
+	var cy := btn.size.y * 0.5
+	var badge_center := Vector2(24.0, cy)
+	var badge_r := 13.5
+
+	# Draw flat-top hexagon badge in the team's color
+	var hex := PackedVector2Array()
+	hex.resize(7)
+	for i in range(6):
+		var a := TAU * float(i) / 6.0
+		hex[i] = badge_center + Vector2(cos(a), sin(a)) * badge_r
+	hex[6] = hex[0]
+
+	var badge_fill_alpha := 0.28 if is_selected else 0.12
+	var badge_stroke_alpha := 1.0 if is_selected else 0.65
+	btn.draw_colored_polygon(hex.slice(0, 6), Color(team_col.r, team_col.g, team_col.b, badge_fill_alpha))
+	btn.draw_polyline(hex, Color(team_col.r, team_col.g, team_col.b, badge_stroke_alpha), 1.8 if is_selected else 1.3, true)
+
+	var font := ThemeDB.fallback_font
+	if font != null:
+		# Draw order number ("1" or "2") inside the hex with the exact same team color
+		var num_col := team_col.lightened(0.18) if is_selected else Color(team_col.r, team_col.g, team_col.b, 0.85)
+		btn.draw_string(
+			font,
+			Vector2(badge_center.x - 4.5, cy + 5.5),
+			order_num_str,
+			HORIZONTAL_ALIGNMENT_LEFT,
+			-1,
+			15,
+			num_col
+		)
+
+		# Draw team name and turn order subtitle in the same color
+		var title_col := team_col.lightened(0.22) if is_selected else Color(team_col.r, team_col.g, team_col.b, 0.82)
+		var sub_col := Color(team_col.r, team_col.g, team_col.b, 0.90 if is_selected else 0.60)
+		btn.draw_string(
+			font,
+			Vector2(44.0, cy - 2.0),
+			"#%s %s" % [order_num_str, team_label],
+			HORIZONTAL_ALIGNMENT_LEFT,
+			-1,
+			13,
+			title_col
+		)
+		btn.draw_string(
+			font,
+			Vector2(44.0, cy + 12.0),
+			order_sub_label,
+			HORIZONTAL_ALIGNMENT_LEFT,
+			-1,
+			10,
+			sub_col
+		)
+
+	# Draw mini faceted Pawn icon on the right side of the button
+	var pawn_center := Vector2(btn.size.x - 18.0, cy + 1.0)
+	VectorBoard.draw_faceted_piece_icon(btn, PieceData.Type.PAWN, team, pawn_center, 11.0, is_selected)
+
+
 ## Draws a red 'X' icon on the New Game modal Cancel button.
 func _on_cancel_new_game_button_draw() -> void:
 	var btn := cancel_new_game_button
 	var c := btn.size * 0.5
-	var red_col := Color(1.0, 0.30, 0.34, 0.95)
+	var alpha := 0.28 if btn.disabled else 0.95
+	var red_col := Color(1.0, 0.30, 0.34, alpha)
 
 	var inner_rect := Rect2(Vector2(3, 3), btn.size - Vector2(6, 6))
-	btn.draw_rect(inner_rect, Color(1.0, 0.25, 0.30, 0.12), true)
-	btn.draw_rect(inner_rect, Color(1.0, 0.30, 0.34, 0.48), false, 1.3)
+	btn.draw_rect(inner_rect, Color(1.0, 0.25, 0.30, 0.04 if btn.disabled else 0.12), true)
+	btn.draw_rect(inner_rect, Color(1.0, 0.30, 0.34, 0.18 if btn.disabled else 0.48), false, 1.3)
 
 	var arm := 6.8
 	btn.draw_line(c + Vector2(-arm, -arm), c + Vector2(arm, arm), red_col, 2.4, true)
@@ -302,6 +492,7 @@ func _on_confirm_new_game_button_draw() -> void:
 func _on_move_executed(_move: GameRules.VectorMove, _notation: String) -> void:
 	promotion_box.visible = false
 	_refresh_hud()
+	_check_and_trigger_ai_turn()
 
 
 func _on_selection_changed(piece: PieceData, hovered_move: GameRules.VectorMove) -> void:
@@ -316,9 +507,65 @@ func _on_promotion_requested(_pending_move: GameRules.VectorMove, _team: PieceDa
 	status_label.text = "Select Promotion Piece"
 
 
+func _is_ai_turn() -> bool:
+	if not is_single_player or vector_board.rules.is_game_over:
+		return false
+	return vector_board.rules.current_turn != human_team
+
+
+func _check_and_trigger_ai_turn() -> void:
+	if not _is_ai_turn():
+		vector_board.input_locked = false
+		return
+
+	_ai_session_id += 1
+	var session := _ai_session_id
+	_ai_thinking = true
+	vector_board.input_locked = true
+	_refresh_hud()
+
+	# Allow UI to render "Thinking..." and piece movement animation to settle before searching
+	await get_tree().create_timer(AI_THINK_DELAY_SEC).timeout
+	if session != _ai_session_id or not is_inside_tree():
+		return
+	if vector_board.rules.is_game_over or not _is_ai_turn():
+		_ai_thinking = false
+		vector_board.input_locked = false
+		_refresh_hud()
+		return
+
+	var ai_team := vector_board.rules.current_turn
+	var chosen_move := ai_player.choose_move(vector_board.rules, ai_team, ai_difficulty)
+	if session != _ai_session_id or not is_inside_tree():
+		return
+
+	_ai_thinking = false
+	vector_board.input_locked = false
+	if chosen_move != null:
+		vector_board.execute_ai_move(chosen_move)
+	else:
+		_refresh_hud()
+
+
 func _refresh_hud() -> void:
 	var rules := vector_board.rules
-	status_label.text = rules.status_text
+
+	if subtitle_label != null:
+		if is_single_player:
+			var human_str := "#1 Cyan" if human_team == PieceData.Team.CYAN else "#2 Magenta"
+			subtitle_label.text = "1P vs CPU (%s) • You: %s" % [
+				AIPlayer.get_difficulty_name(ai_difficulty),
+				human_str
+			]
+		else:
+			subtitle_label.text = "2P Pass & Play • 91 Hexes"
+
+	if _ai_thinking and not rules.is_game_over:
+		var cpu_team_name := "Cyan" if rules.current_turn == PieceData.Team.CYAN else "Magenta"
+		status_label.text = "%s (CPU) Thinking..." % cpu_team_name
+	else:
+		status_label.text = rules.status_text
+
 	if rules.current_turn == PieceData.Team.CYAN:
 		status_label.modulate = VectorBoard.COLOR_CYAN
 	else:
@@ -331,8 +578,17 @@ func _refresh_hud() -> void:
 
 func _update_telemetry(piece: PieceData, hovered_move: GameRules.VectorMove) -> void:
 	if piece == null:
+		var mode_desc: String
+		if is_single_player:
+			var cpu_col := "Magenta (#2)" if human_team == PieceData.Team.CYAN else "Cyan (#1)"
+			mode_desc = "[b]Mode:[/b] 1P vs CPU (%s) — CPU plays %s\n" % [
+				AIPlayer.get_difficulty_name(ai_difficulty),
+				cpu_col
+			]
+		else:
+			mode_desc = "[b]Mode:[/b] 2P Pass & Play (91 Hexes)\n"
 		telemetry_label.text = (
-			"[b]Glinski Hexagonal Chess (91 Hexes)[/b]\n"
+			mode_desc
 			+ "Select a polygon piece to inspect its axial & Euclidean movement vectors."
 		)
 		return
@@ -379,16 +635,85 @@ func _update_history() -> void:
 
 
 func _on_new_game_pressed() -> void:
-	_open_new_game_modal()
+	_open_new_game_modal(false)
 
 
-func _open_new_game_modal() -> void:
+func _open_new_game_modal(is_startup: bool = false) -> void:
+	_is_initial_startup = is_startup
+	_pending_single_player = is_single_player
+	_pending_human_team = human_team
+	_pending_difficulty = ai_difficulty
+
+	if modal_description != null:
+		if is_startup:
+			modal_description.text = "Select game mode, player color, and difficulty."
+		else:
+			modal_description.text = "Current board progress will be reset."
+
+	if cancel_new_game_button != null:
+		cancel_new_game_button.disabled = is_startup
+
 	confirm_slider.value = 0.0
+	_refresh_modal_option_controls()
 	_update_new_game_modal_state(0.0)
 	new_game_modal.visible = true
 
 
+func _refresh_modal_option_controls() -> void:
+	if cpu_options_box != null:
+		cpu_options_box.visible = _pending_single_player
+
+	for btn in [
+		mode_1p_button,
+		mode_2p_button,
+		color_cyan_button,
+		color_magenta_button,
+		diff_easy_button,
+		diff_med_button,
+		diff_hard_button,
+	]:
+		if btn != null:
+			btn.queue_redraw()
+
+
+func _on_mode_1p_pressed() -> void:
+	_pending_single_player = true
+	_refresh_modal_option_controls()
+
+
+func _on_mode_2p_pressed() -> void:
+	_pending_single_player = false
+	_refresh_modal_option_controls()
+
+
+func _on_color_cyan_pressed() -> void:
+	_pending_human_team = PieceData.Team.CYAN
+	_refresh_modal_option_controls()
+
+
+func _on_color_magenta_pressed() -> void:
+	_pending_human_team = PieceData.Team.MAGENTA
+	_refresh_modal_option_controls()
+
+
+func _on_diff_easy_pressed() -> void:
+	_pending_difficulty = AIPlayer.Difficulty.EASY
+	_refresh_modal_option_controls()
+
+
+func _on_diff_med_pressed() -> void:
+	_pending_difficulty = AIPlayer.Difficulty.MEDIUM
+	_refresh_modal_option_controls()
+
+
+func _on_diff_hard_pressed() -> void:
+	_pending_difficulty = AIPlayer.Difficulty.HARD
+	_refresh_modal_option_controls()
+
+
 func _on_cancel_new_game_pressed() -> void:
+	if _is_initial_startup:
+		return
 	new_game_modal.visible = false
 	confirm_slider.value = 0.0
 
@@ -415,7 +740,7 @@ func _update_new_game_modal_state(val: float) -> void:
 	confirm_new_game_button.queue_redraw()
 
 	if unlocked:
-		slider_hint_label.text = "Unlocked - Press + to Reset"
+		slider_hint_label.text = "Unlocked - Press + to Start Match"
 		slider_hint_label.modulate = Color(0.25, 1.0, 0.65, 1.0)
 	else:
 		slider_hint_label.text = "Slide all the way right to unlock >>"
@@ -425,16 +750,49 @@ func _update_new_game_modal_state(val: float) -> void:
 func _on_confirm_new_game_pressed() -> void:
 	if confirm_slider.value < SLIDER_UNLOCK_THRESHOLD:
 		return
+
+	# Cancel any in-flight AI move
+	_ai_session_id += 1
+	_ai_thinking = false
+
+	is_single_player = _pending_single_player
+	human_team = _pending_human_team
+	ai_difficulty = _pending_difficulty
+	_is_initial_startup = false
+
 	new_game_modal.visible = false
 	promotion_box.visible = false
 	vector_board.start_new_game()
+	# Orient board so the player's chosen team is at the bottom
+	vector_board.board_flipped = (is_single_player and human_team == PieceData.Team.MAGENTA)
+	vector_board.queue_redraw()
 	_refresh_hud()
+	_check_and_trigger_ai_turn()
 
 
 func _on_undo_pressed() -> void:
 	promotion_box.visible = false
-	if vector_board.undo_move():
+	# Cancel any pending AI thinking session
+	_ai_session_id += 1
+	var was_ai_thinking := _ai_thinking
+	_ai_thinking = false
+	vector_board.input_locked = false
+
+	if is_single_player:
+		if was_ai_thinking:
+			# AI was thinking about its reply to the human's move: undo the human's move
+			vector_board.undo_move()
+		else:
+			# It is currently the human's turn (or game over): undo until it is the human's turn again,
+			# but if human is Magenta (#2) and we undo back to the initial move, let CPU play Cyan (#1).
+			if vector_board.undo_move():
+				if vector_board.rules.current_turn != human_team and not vector_board.rules.move_history.is_empty():
+					vector_board.undo_move()
 		_refresh_hud()
+		_check_and_trigger_ai_turn()
+	else:
+		if vector_board.undo_move():
+			_refresh_hud()
 
 
 func _on_flip_pressed() -> void:
