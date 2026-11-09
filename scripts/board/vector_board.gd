@@ -21,7 +21,13 @@ const COLOR_VECTOR_RAY := Color(0.25, 1.0, 0.65, 0.85)
 const COLOR_CAPTURE_RAY := Color(1.0, 0.32, 0.25, 0.95)
 const COLOR_LAST_MOVE := Color(1.0, 0.82, 0.2, 0.70)
 
+const ATLAS_CELL_SIZE: int = 128
+const ATLAS_COLS: int = 6
+const ATLAS_ROWS: int = 4
+const ATLAS_RADIUS_RATIO: float = 0.45
+
 static var line_aa_enabled: bool = true
+static var _piece_atlas_texture: Texture2D = null
 
 var rules: GameRules = GameRules.new()
 var selected_piece: PieceData = null
@@ -52,7 +58,10 @@ var _all_cells: Array[Vector2i] = []
 var _cell_meta: Array[Dictionary] = []
 var _cached_turn_moves: Dictionary = {}
 var _cached_check_kings: Array[PieceData] = []
+var _bg_viewport: SubViewport = null
 var _bg_layer: Control = null
+var _piece_atlas_viewport: SubViewport = null
+var _piece_atlas_layer: Control = null
 
 
 func _init() -> void:
@@ -63,9 +72,15 @@ func _ready() -> void:
 	mouse_filter = Control.MOUSE_FILTER_STOP
 	_init_cell_metadata()
 	_setup_bg_layer()
+	_setup_piece_atlas()
 	resized.connect(_on_board_resized)
 	_rebuild_board_cache()
 	set_process(true)
+
+
+func _exit_tree() -> void:
+	if _piece_atlas_viewport != null and _piece_atlas_texture == _piece_atlas_viewport.get_texture():
+		_piece_atlas_texture = null
 
 
 func _init_cell_metadata() -> void:
@@ -87,15 +102,84 @@ func _init_cell_metadata() -> void:
 
 
 func _setup_bg_layer() -> void:
-	if _bg_layer != null:
+	if _bg_viewport != null:
 		return
+	_bg_viewport = SubViewport.new()
+	_bg_viewport.name = "BoardBackgroundViewport"
+	_bg_viewport.transparent_bg = true
+	_bg_viewport.render_target_clear_mode = SubViewport.CLEAR_MODE_ALWAYS
+	_bg_viewport.render_target_update_mode = SubViewport.UPDATE_ONCE
+	var vp_w := maxi(int(size.x), 1)
+	var vp_h := maxi(int(size.y), 1)
+	_bg_viewport.size = Vector2i(vp_w, vp_h)
+
 	_bg_layer = Control.new()
 	_bg_layer.name = "BoardBackgroundLayer"
 	_bg_layer.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	_bg_layer.show_behind_parent = true
-	_bg_layer.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	_bg_layer.size = Vector2(vp_w, vp_h)
 	_bg_layer.draw.connect(_on_bg_layer_draw)
-	add_child(_bg_layer)
+	_bg_viewport.add_child(_bg_layer)
+	add_child(_bg_viewport)
+
+
+func _setup_piece_atlas() -> void:
+	if _piece_atlas_viewport != null:
+		return
+	var atlas_size := Vector2i(ATLAS_COLS * ATLAS_CELL_SIZE, ATLAS_ROWS * ATLAS_CELL_SIZE)
+	_piece_atlas_viewport = SubViewport.new()
+	_piece_atlas_viewport.name = "PieceAtlasViewport"
+	_piece_atlas_viewport.transparent_bg = true
+	_piece_atlas_viewport.render_target_clear_mode = SubViewport.CLEAR_MODE_ALWAYS
+	_piece_atlas_viewport.render_target_update_mode = SubViewport.UPDATE_ONCE
+	_piece_atlas_viewport.size = atlas_size
+
+	_piece_atlas_layer = Control.new()
+	_piece_atlas_layer.name = "PieceAtlasLayer"
+	_piece_atlas_layer.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_piece_atlas_layer.size = Vector2(atlas_size)
+	_piece_atlas_layer.draw.connect(_on_piece_atlas_draw)
+	_piece_atlas_viewport.add_child(_piece_atlas_layer)
+	add_child(_piece_atlas_viewport)
+	_piece_atlas_texture = _piece_atlas_viewport.get_texture()
+
+
+func _on_piece_atlas_draw() -> void:
+	var cell_px := float(ATLAS_CELL_SIZE)
+	var atlas_r := cell_px * ATLAS_RADIUS_RATIO
+	var piece_types := [
+		PieceData.Type.PAWN,
+		PieceData.Type.KNIGHT,
+		PieceData.Type.BISHOP,
+		PieceData.Type.ROOK,
+		PieceData.Type.QUEEN,
+		PieceData.Type.KING,
+	]
+	for col_idx in range(piece_types.size()):
+		var p_type: PieceData.Type = piece_types[col_idx]
+		for team_idx in range(2):
+			var p_team: PieceData.Team = PieceData.Team.CYAN if team_idx == 0 else PieceData.Team.MAGENTA
+			for sel_idx in range(2):
+				var is_sel: bool = (sel_idx == 1)
+				var row_idx: int = team_idx * 2 + sel_idx
+				var cell_center := Vector2(
+					(float(col_idx) + 0.5) * cell_px,
+					(float(row_idx) + 0.5) * cell_px
+				)
+				var mesh := PieceData.get_piece_array_mesh(p_type, p_team, is_sel)
+				var xform := Transform2D(0.0, Vector2(atlas_r, atlas_r), 0.0, cell_center)
+				_piece_atlas_layer.draw_mesh(mesh, null, xform)
+
+
+static func get_piece_atlas_region(p_type: PieceData.Type, p_team: PieceData.Team, is_selected: bool) -> Rect2:
+	var col_idx := int(p_type)
+	var row_idx := int(p_team) * 2 + (1 if is_selected else 0)
+	var cell_px := float(ATLAS_CELL_SIZE)
+	return Rect2(
+		float(col_idx) * cell_px,
+		float(row_idx) * cell_px,
+		cell_px,
+		cell_px
+	)
 
 
 func _on_board_resized() -> void:
@@ -105,8 +189,15 @@ func _on_board_resized() -> void:
 
 
 func _request_bg_redraw() -> void:
-	if _bg_layer != null:
+	if _bg_viewport != null and _bg_layer != null:
+		var vp_w := maxi(int(size.x), 1)
+		var vp_h := maxi(int(size.y), 1)
+		var target_size := Vector2i(vp_w, vp_h)
+		if _bg_viewport.size != target_size:
+			_bg_viewport.size = target_size
+		_bg_layer.size = Vector2(vp_w, vp_h)
 		_bg_layer.queue_redraw()
+		_bg_viewport.render_target_update_mode = SubViewport.UPDATE_ONCE
 
 
 func set_line_antialiasing(enabled: bool) -> void:
@@ -338,8 +429,13 @@ func _draw_board_background_on(canvas: CanvasItem) -> void:
 func _draw() -> void:
 	_compute_board_metrics()
 
-	# Fallback if rendered without _bg_layer child node
-	if _bg_layer == null:
+	# 1 & 2. Render cached static board SubViewport texture as 1 quad (or fallback if headless)
+	if _bg_viewport != null and size.x > 1.0 and size.y > 1.0:
+		var target_vp_size := Vector2i(int(size.x), int(size.y))
+		if _bg_viewport.size != target_vp_size:
+			_request_bg_redraw()
+		draw_texture_rect(_bg_viewport.get_texture(), Rect2(Vector2.ZERO, size), false)
+	else:
 		_draw_board_background_on(self)
 
 	# 3. Highlight last executed move
@@ -403,7 +499,7 @@ func _draw() -> void:
 			3.0
 		)
 
-	# 8. Draw all pieces using pre-baked 2D ArrayMeshes
+	# 8. Draw all pieces using batched shared atlas quads
 	for p in rules.pieces:
 		_draw_polygon_piece(p)
 
@@ -440,6 +536,16 @@ static func draw_faceted_piece_icon(
 	radius: float,
 	is_selected: bool = false
 ) -> void:
+	if _piece_atlas_texture != null:
+		var src_rect := get_piece_atlas_region(p_type, p_team, is_selected)
+		var dst_extent := radius / ATLAS_RADIUS_RATIO
+		var dst_rect := Rect2(
+			center - Vector2(dst_extent * 0.5, dst_extent * 0.5),
+			Vector2(dst_extent, dst_extent)
+		)
+		canvas.draw_texture_rect_region(_piece_atlas_texture, dst_rect, src_rect)
+		return
+
 	var mesh := PieceData.get_piece_array_mesh(p_type, p_team, is_selected)
 	var xform := Transform2D(0.0, Vector2(radius, radius), 0.0, center)
 	canvas.draw_mesh(mesh, null, xform)

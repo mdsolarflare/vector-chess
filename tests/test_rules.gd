@@ -223,6 +223,7 @@ func _test_piece_faceted_meshes() -> void:
 	print("\n-- PieceData Faceted Vector Meshes & Pre-Baked ArrayMeshes --")
 	var all_valid := true
 	var array_meshes_valid := true
+	var atlas_regions := {}
 	for t in [
 		PieceData.Type.PAWN,
 		PieceData.Type.KNIGHT,
@@ -245,9 +246,12 @@ func _test_piece_faceted_meshes() -> void:
 				if am == null or am.get_surface_count() != 1 or am != am_cached:
 					array_meshes_valid = false
 					break
+				var reg := VectorBoard.get_piece_atlas_region(t, team, sel)
+				atlas_regions[reg.position] = reg
 
 	_assert(all_valid, "All 6 piece types generate non-empty faceted vector silhouettes and outlines")
 	_assert(array_meshes_valid, "All 24 (type, team, selected) piece variants build and cache valid 2D ArrayMeshes")
+	_assert(atlas_regions.size() == 24, "All 24 piece variants map to distinct 128x128 regions in the shared piece atlas")
 
 
 func _test_ai_player_move_selection() -> void:
@@ -281,9 +285,10 @@ func _test_software_renderer_detection() -> void:
 
 
 func _test_vector_board_caching_and_idle_redraw() -> void:
-	print("\n-- VectorBoard Move Caching, Static Background Layer & Idle Animation State --")
+	print("\n-- VectorBoard Move Caching, SubViewport Board/Piece Atlas & Idle Animation State --")
 	var board := VectorBoard.new()
 	board._setup_bg_layer()
+	board._setup_piece_atlas()
 	board._rebuild_board_cache()
 
 	_assert(
@@ -291,8 +296,14 @@ func _test_vector_board_caching_and_idle_redraw() -> void:
 		"VectorBoard precomputes static metadata (color, pawn start, algebraic coord) for all 91 hex cells"
 	)
 	_assert(
-		board._bg_layer != null and board._bg_layer.show_behind_parent,
-		"VectorBoard initializes dedicated BoardBackgroundLayer child Control behind dynamic foreground"
+		board._bg_viewport != null and board._bg_viewport.transparent_bg and board._bg_layer != null,
+		"VectorBoard initializes BoardBackgroundViewport (SubViewport UPDATE_ONCE) with BoardBackgroundLayer"
+	)
+	_assert(
+		board._piece_atlas_viewport != null
+		and board._piece_atlas_viewport.size == Vector2i(768, 512)
+		and VectorBoard._piece_atlas_texture != null,
+		"VectorBoard initializes 768x512 PieceAtlasViewport and shared _piece_atlas_texture"
 	)
 	_assert(
 		board._cached_turn_moves.size() == 18,
