@@ -6,6 +6,9 @@ extends Control
 const SHADE_NAMES: Array[String] = ["Dark", "Mid", "Light"]
 const SLIDER_UNLOCK_THRESHOLD: float = 98.0
 const AI_THINK_DELAY_SEC: float = 0.35
+const DESKTOP_BASE_SIZE := Vector2i(1280, 800)
+const MOBILE_BASE_SHORT: int = 480
+const MOBILE_BASE_LONG: int = 800
 const SOFTWARE_RENDERER_PATTERNS: Array[String] = [
 	"SwiftShader",
 	"llvmpipe",
@@ -16,14 +19,21 @@ const SOFTWARE_RENDERER_PATTERNS: Array[String] = [
 	"Software",
 ]
 
+@onready var margin_container: MarginContainer = %MarginContainer
 @onready var split_container: BoxContainer = %MainLayout
 @onready var vector_board: VectorBoard = %VectorBoard
-@onready var subtitle_label: Label = %SubtitleLabel
-@onready var status_label: Label = %StatusLabel
-@onready var telemetry_label: RichTextLabel = %TelemetryLabel
-@onready var history_label: RichTextLabel = %HistoryLabel
 @onready var side_panel: PanelContainer = %SidePanel
+@onready var side_panel_vbox: VBoxContainer = %VBox
+@onready var title_label: Label = %TitleLabel
+@onready var subtitle_label: Label = %SubtitleLabel
+@onready var h_separator_1: HSeparator = %HSeparator1
+@onready var status_label: Label = %StatusLabel
 @onready var promotion_box: VBoxContainer = %PromotionBox
+@onready var promote_grid: GridContainer = %PromoteGrid
+@onready var telemetry_label: RichTextLabel = %TelemetryLabel
+@onready var h_separator_2: HSeparator = %HSeparator2
+@onready var history_header: Label = %HistoryHeader
+@onready var history_label: RichTextLabel = %HistoryLabel
 @onready var toggle_panel_button: Button = %TogglePanelButton
 @onready var controls_grid: GridContainer = %ControlsGrid
 @onready var new_game_button: Button = %NewGameButton
@@ -32,6 +42,9 @@ const SOFTWARE_RENDERER_PATTERNS: Array[String] = [
 @onready var vectors_button: Button = %VectorsButton
 
 @onready var new_game_modal: ColorRect = %NewGameModal
+@onready var modal_panel: PanelContainer = %ModalPanel
+@onready var modal_vbox: VBoxContainer = %ModalVBox
+@onready var modal_title: Label = %ModalTitle
 @onready var modal_description: Label = %ModalDescription
 @onready var mode_1p_button: Button = %Mode1PButton
 @onready var mode_2p_button: Button = %Mode2PButton
@@ -62,21 +75,29 @@ var _pending_human_team: PieceData.Team = PieceData.Team.CYAN
 var _pending_difficulty: AIPlayer.Difficulty = AIPlayer.Difficulty.MEDIUM
 var _is_initial_startup: bool = true
 
+## Responsive UI & slider animation state
+var _is_compact_ui: bool = false
+var _slider_anim_time: float = 0.0
+
 ## Async AI turn state
 var _ai_thinking: bool = false
 var _ai_session_id: int = 0
 
 
 func _ready() -> void:
+	_resolve_nodes()
 	vector_board.move_executed.connect(_on_move_executed)
 	vector_board.selection_changed.connect(_on_selection_changed)
 	vector_board.promotion_requested.connect(_on_promotion_requested)
+
+	_setup_confirm_slider_theme()
 
 	toggle_panel_button.draw.connect(_on_toggle_panel_button_draw)
 	new_game_button.draw.connect(_on_new_game_button_draw)
 	undo_button.draw.connect(_on_undo_button_draw)
 	flip_button.draw.connect(_on_flip_button_draw)
 	vectors_button.draw.connect(_on_vectors_button_draw)
+	confirm_slider.draw.connect(_on_confirm_slider_draw)
 	cancel_new_game_button.draw.connect(_on_cancel_new_game_button_draw)
 	confirm_new_game_button.draw.connect(_on_confirm_new_game_button_draw)
 
@@ -95,9 +116,79 @@ func _ready() -> void:
 	_update_toggle_panel_button()
 	_update_control_buttons()
 	_refresh_hud()
+	set_process(true)
 
 	# Default startup mode: open in the New Game Setup modal
 	_open_new_game_modal(true)
+
+
+func _process(delta: float) -> void:
+	if new_game_modal != null and new_game_modal.visible and confirm_slider != null:
+		_slider_anim_time += delta
+		confirm_slider.queue_redraw()
+
+
+func _setup_confirm_slider_theme() -> void:
+	if confirm_slider == null:
+		return
+	var empty_style := StyleBoxEmpty.new()
+	confirm_slider.add_theme_stylebox_override("slider", empty_style)
+	confirm_slider.add_theme_stylebox_override("grabber_area", empty_style)
+	confirm_slider.add_theme_stylebox_override("grabber_area_highlight", empty_style)
+
+	# 44x44 transparent grabber icon so HSlider touch/drag math insets the thumb center by 22px
+	var img := Image.create_empty(44, 44, false, Image.FORMAT_RGBA8)
+	var blank_tex := ImageTexture.create_from_image(img)
+	confirm_slider.add_theme_icon_override("grabber", blank_tex)
+	confirm_slider.add_theme_icon_override("grabber_highlight", blank_tex)
+	confirm_slider.add_theme_icon_override("grabber_disabled", blank_tex)
+	confirm_slider.add_theme_icon_override("tick", blank_tex)
+
+
+func _resolve_nodes() -> void:
+	if split_container != null:
+		return
+	margin_container = get_node_or_null("%MarginContainer") as MarginContainer
+	split_container = get_node_or_null("%MainLayout") as BoxContainer
+	vector_board = get_node_or_null("%VectorBoard") as VectorBoard
+	side_panel = get_node_or_null("%SidePanel") as PanelContainer
+	side_panel_vbox = get_node_or_null("%VBox") as VBoxContainer
+	title_label = get_node_or_null("%TitleLabel") as Label
+	subtitle_label = get_node_or_null("%SubtitleLabel") as Label
+	h_separator_1 = get_node_or_null("%HSeparator1") as HSeparator
+	status_label = get_node_or_null("%StatusLabel") as Label
+	promotion_box = get_node_or_null("%PromotionBox") as VBoxContainer
+	promote_grid = get_node_or_null("%PromoteGrid") as GridContainer
+	telemetry_label = get_node_or_null("%TelemetryLabel") as RichTextLabel
+	h_separator_2 = get_node_or_null("%HSeparator2") as HSeparator
+	history_header = get_node_or_null("%HistoryHeader") as Label
+	history_label = get_node_or_null("%HistoryLabel") as RichTextLabel
+	toggle_panel_button = get_node_or_null("%TogglePanelButton") as Button
+	controls_grid = get_node_or_null("%ControlsGrid") as GridContainer
+	new_game_button = get_node_or_null("%NewGameButton") as Button
+	undo_button = get_node_or_null("%UndoButton") as Button
+	flip_button = get_node_or_null("%FlipButton") as Button
+	vectors_button = get_node_or_null("%VectorsButton") as Button
+	new_game_modal = get_node_or_null("%NewGameModal") as ColorRect
+	modal_panel = get_node_or_null("%ModalPanel") as PanelContainer
+	modal_vbox = get_node_or_null("%ModalVBox") as VBoxContainer
+	modal_title = get_node_or_null("%ModalTitle") as Label
+	modal_description = get_node_or_null("%ModalDescription") as Label
+	mode_1p_button = get_node_or_null("%Mode1PButton") as Button
+	mode_2p_button = get_node_or_null("%Mode2PButton") as Button
+	cpu_options_box = get_node_or_null("%CpuOptionsBox") as VBoxContainer
+	color_cyan_button = get_node_or_null("%ColorCyanButton") as Button
+	color_magenta_button = get_node_or_null("%ColorMagentaButton") as Button
+	diff_easy_button = get_node_or_null("%DiffEasyButton") as Button
+	diff_med_button = get_node_or_null("%DiffMedButton") as Button
+	diff_hard_button = get_node_or_null("%DiffHardButton") as Button
+	confirm_slider = get_node_or_null("%ConfirmSlider") as HSlider
+	slider_hint_label = get_node_or_null("%SliderHintLabel") as Label
+	cancel_new_game_button = get_node_or_null("%CancelNewGameButton") as Button
+	confirm_new_game_button = get_node_or_null("%ConfirmNewGameButton") as Button
+	gpu_warning_banner = get_node_or_null("%GpuWarningBanner") as PanelContainer
+	gpu_warning_label = get_node_or_null("%GpuWarningLabel") as Label
+	dismiss_gpu_banner_button = get_node_or_null("%DismissGpuBannerButton") as Button
 
 
 static func is_software_renderer(adapter: String) -> bool:
@@ -105,6 +196,62 @@ static func is_software_renderer(adapter: String) -> bool:
 		if adapter.containsn(pattern):
 			return true
 	return false
+
+
+## Determines whether the environment should use mobile UI scaling and compact mobile layout.
+static func is_mobile_environment(
+	has_mobile_feature: bool,
+	is_web: bool,
+	is_touchscreen: bool,
+	window_size: Vector2i
+) -> bool:
+	if has_mobile_feature:
+		return true
+	var short_side := mini(window_size.x, window_size.y)
+	var is_portrait := window_size.y > int(float(window_size.x) * 1.05)
+	if short_side > 0 and short_side < 600:
+		return true
+	if is_touchscreen and is_web and (is_portrait or (short_side > 0 and short_side < 760)):
+		return true
+	return false
+
+
+## Computes the target Window.content_scale_size for canvas_items + expand stretch mode.
+## - Desktop landscape keeps 1280x800; desktop portrait swaps to 800x1280 so narrow portrait
+##   windows are not shrunk by dividing width by 1280.
+## - Mobile portrait uses 480x800 and mobile landscape uses 800x480 so all fonts, touch
+##   buttons, and modals scale up cleanly with consistent physical size across rotations.
+static func compute_target_content_scale_size(window_size: Vector2i, is_mobile: bool) -> Vector2i:
+	var is_portrait := window_size.y > int(float(window_size.x) * 1.05)
+	if is_mobile:
+		if is_portrait:
+			return Vector2i(MOBILE_BASE_SHORT, MOBILE_BASE_LONG)
+		return Vector2i(MOBILE_BASE_LONG, MOBILE_BASE_SHORT)
+	if is_portrait:
+		return Vector2i(DESKTOP_BASE_SIZE.y, DESKTOP_BASE_SIZE.x)
+	return DESKTOP_BASE_SIZE
+
+
+func _detect_mobile_platform(window_size: Vector2i) -> bool:
+	var has_mobile_feat := (
+		OS.has_feature("mobile")
+		or OS.has_feature("android")
+		or OS.has_feature("ios")
+		or OS.has_feature("web_android")
+		or OS.has_feature("web_ios")
+		or OS.get_cmdline_user_args().has("--mobile")
+		or OS.get_cmdline_args().has("--mobile")
+	)
+	var is_web := OS.has_feature("web")
+	if is_web and not has_mobile_feat:
+		var ua_mobile: Variant = JavaScriptBridge.eval(
+			"/Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent) || (navigator.maxTouchPoints > 1 && /MacIntel/.test(navigator.platform))",
+			true
+		)
+		if ua_mobile is bool and ua_mobile:
+			has_mobile_feat = true
+	var is_touch := DisplayServer.is_touchscreen_available()
+	return is_mobile_environment(has_mobile_feat, is_web, is_touch, window_size)
 
 
 func _check_browser_gpu() -> void:
@@ -137,19 +284,129 @@ func _on_dismiss_gpu_banner_pressed() -> void:
 
 
 func _on_viewport_size_changed() -> void:
+	_resolve_nodes()
 	if split_container == null or side_panel == null:
 		return
+
+	var root_win := get_tree().root if is_inside_tree() else null
+	var win_size: Vector2i
+	if root_win != null and root_win.size.x > 0 and root_win.size.y > 0:
+		win_size = root_win.size
+	else:
+		var rect_sz := get_viewport_rect().size
+		win_size = Vector2i(int(rect_sz.x), int(rect_sz.y))
+
+	var is_mobile := _detect_mobile_platform(win_size)
+	if root_win != null:
+		var target_scale_size := compute_target_content_scale_size(win_size, is_mobile)
+		if root_win.content_scale_size != target_scale_size:
+			root_win.content_scale_size = target_scale_size
+
 	var vp_size := get_viewport_rect().size
+	_apply_responsive_layout(vp_size, is_mobile)
+
+
+func _apply_responsive_layout(vp_size: Vector2, is_mobile: bool) -> void:
+	_resolve_nodes()
+	if split_container == null or side_panel == null:
+		return
+
 	var is_portrait := vp_size.y > vp_size.x * 1.05
+	var is_compact := is_mobile or minf(vp_size.x, vp_size.y) < 560.0
+	var compact_changed := (_is_compact_ui != is_compact)
+	_is_compact_ui = is_compact
+
+	var outer_margin := 8 if is_compact else 16
+	if margin_container != null:
+		margin_container.add_theme_constant_override("margin_left", outer_margin)
+		margin_container.add_theme_constant_override("margin_top", outer_margin)
+		margin_container.add_theme_constant_override("margin_right", outer_margin)
+		margin_container.add_theme_constant_override("margin_bottom", outer_margin)
+
+	split_container.add_theme_constant_override("separation", 8 if is_compact else 16)
 	split_container.vertical = is_portrait
+
+	var panel_style := side_panel.get_theme_stylebox("panel") as StyleBoxFlat
+	if panel_style != null:
+		var pad := 10.0 if is_compact else 14.0
+		panel_style.content_margin_left = pad
+		panel_style.content_margin_top = pad
+		panel_style.content_margin_right = pad
+		panel_style.content_margin_bottom = pad
+
+	if side_panel_vbox != null:
+		side_panel_vbox.add_theme_constant_override("separation", 6 if is_compact else 10)
+
+	# Hide non-essential decorative headers on mobile/portrait so the HUD doesn't crowd the board
+	var show_decorative_headers := not is_compact and not is_portrait
+	if title_label != null:
+		title_label.visible = show_decorative_headers
+	if h_separator_1 != null:
+		h_separator_1.visible = show_decorative_headers
+	if history_header != null:
+		history_header.visible = show_decorative_headers
+
+	if telemetry_label != null:
+		telemetry_label.custom_minimum_size = Vector2(0, 38 if is_compact else 72)
+
 	if is_portrait:
-		side_panel.custom_minimum_size = Vector2(0, 210)
+		side_panel.custom_minimum_size = Vector2(0, 176 if is_compact else 210)
 		if controls_grid != null:
 			controls_grid.columns = 4
+		if promote_grid != null:
+			promote_grid.columns = 4
 	else:
-		side_panel.custom_minimum_size = Vector2(340, 0)
+		side_panel.custom_minimum_size = Vector2(248 if is_compact else 340, 0)
 		if controls_grid != null:
-			controls_grid.columns = 2
+			controls_grid.columns = 4 if is_compact else 2
+		if promote_grid != null:
+			promote_grid.columns = 2 if is_compact else 4
+
+	if toggle_panel_button != null:
+		var btn_sz := 54.0 if (is_compact or is_portrait) else 44.0
+		var margin_tr := 12.0 if is_compact else 24.0
+		toggle_panel_button.custom_minimum_size = Vector2(btn_sz, btn_sz)
+		toggle_panel_button.offset_left = -(margin_tr + btn_sz)
+		toggle_panel_button.offset_top = margin_tr
+		toggle_panel_button.offset_right = -margin_tr
+		toggle_panel_button.offset_bottom = margin_tr + btn_sz
+		toggle_panel_button.size = Vector2(btn_sz, btn_sz)
+		toggle_panel_button.queue_redraw()
+
+	_apply_modal_responsive_layout(vp_size, is_compact)
+
+	if compact_changed and vector_board != null:
+		_update_telemetry(vector_board.selected_piece, vector_board.hovered_move)
+
+
+func _apply_modal_responsive_layout(vp_size: Vector2, is_compact: bool) -> void:
+	if modal_panel == null:
+		return
+	var compact_modal_y := vp_size.y < 560.0
+	var target_modal_w := clampf(vp_size.x - 24.0, 300.0, 400.0) if is_compact else 380.0
+	modal_panel.custom_minimum_size = Vector2(target_modal_w, 0)
+
+	var modal_style := modal_panel.get_theme_stylebox("panel") as StyleBoxFlat
+	if modal_style != null:
+		var pad_x := 16.0 if is_compact else 22.0
+		var pad_y := 12.0 if compact_modal_y else 20.0
+		modal_style.content_margin_left = pad_x
+		modal_style.content_margin_right = pad_x
+		modal_style.content_margin_top = pad_y
+		modal_style.content_margin_bottom = pad_y
+
+	if modal_vbox != null:
+		modal_vbox.add_theme_constant_override("separation", 6 if compact_modal_y else 12)
+	if cpu_options_box != null:
+		cpu_options_box.add_theme_constant_override("separation", 6 if compact_modal_y else 10)
+	if modal_description != null:
+		modal_description.visible = not compact_modal_y
+	if confirm_slider != null:
+		confirm_slider.custom_minimum_size.y = 44.0 if compact_modal_y else 48.0
+	if cancel_new_game_button != null:
+		cancel_new_game_button.custom_minimum_size.y = 40.0 if compact_modal_y else 44.0
+	if confirm_new_game_button != null:
+		confirm_new_game_button.custom_minimum_size.y = 40.0 if compact_modal_y else 44.0
 
 
 func _on_toggle_panel_pressed() -> void:
@@ -192,8 +449,9 @@ func _update_control_buttons() -> void:
 func _on_toggle_panel_button_draw() -> void:
 	var btn := toggle_panel_button
 	var s := btn.size
-	var icon_w := 20.0
-	var icon_h := 15.0
+	var scale_f := maxf(minf(s.x, s.y) / 34.0, 0.85)
+	var icon_w := 20.0 * scale_f
+	var icon_h := 15.0 * scale_f
 	var top_left := (s - Vector2(icon_w, icon_h)) * 0.5
 	var rect := Rect2(top_left, Vector2(icon_w, icon_h))
 	var aa := VectorBoard.line_aa_enabled
@@ -209,19 +467,19 @@ func _on_toggle_panel_button_draw() -> void:
 		)
 		btn.draw_rect(side_rect, fill_col, true)
 
-	btn.draw_rect(rect, stroke_col, false, 1.6)
+	btn.draw_rect(rect, stroke_col, false, 1.6 * scale_f)
 	btn.draw_line(
 		Vector2(split_x, rect.position.y),
 		Vector2(split_x, rect.end.y),
 		stroke_col,
-		1.5,
+		1.5 * scale_f,
 		aa
 	)
 
 	var cy := rect.get_center().y
 	var cx := rect.position.x + (split_x - rect.position.x) * 0.5
-	var chev_w := 2.4
-	var chev_h := 3.0
+	var chev_w := 2.4 * scale_f
+	var chev_h := 3.0 * scale_f
 	var chevron: PackedVector2Array
 	if side_panel != null and side_panel.visible:
 		chevron = PackedVector2Array([
@@ -235,7 +493,7 @@ func _on_toggle_panel_button_draw() -> void:
 			Vector2(cx - chev_w * 0.5, cy),
 			Vector2(cx + chev_w * 0.5, cy + chev_h),
 		])
-	btn.draw_polyline(chevron, stroke_col, 1.6, aa)
+	btn.draw_polyline(chevron, stroke_col, 1.6 * scale_f, aa)
 
 
 ## Draws a flat-top Hexagon with a bold '+' sign inside for New Game.
@@ -512,6 +770,208 @@ func _draw_team_order_button(
 	VectorBoard.draw_faceted_piece_icon(btn, PieceData.Type.PAWN, team, pawn_center, 11.0, is_selected)
 
 
+## Procedural "Slide-to-Unlock" vector track and faceted Hexagon thumb for ConfirmSlider.
+func _on_confirm_slider_draw() -> void:
+	if confirm_slider == null:
+		return
+	var sl := confirm_slider
+	var s := sl.size
+	if s.x < 40.0 or s.y < 16.0:
+		return
+
+	var aa := VectorBoard.line_aa_enabled
+	var ratio := clampf(sl.value / sl.max_value, 0.0, 1.0)
+	var unlocked := sl.value >= SLIDER_UNLOCK_THRESHOLD
+	var cy := s.y * 0.5
+	var pad_x := 22.0
+	var start_x := pad_x
+	var end_x := maxf(s.x - pad_x, start_x + 1.0)
+	var thumb_x := lerpf(start_x, end_x, ratio)
+	var thumb_r := clampf(cy - 4.0, 14.0, 20.0)
+
+	var cyan_col := VectorBoard.COLOR_CYAN
+	var green_col := Color(0.25, 1.0, 0.65, 1.0)
+	var accent_col := green_col if unlocked else cyan_col.lerp(green_col, ratio * 0.65)
+
+	# 1. Recessed vector track channel
+	var track_rect := Rect2(Vector2(2.0, 2.0), s - Vector2(4.0, 4.0))
+	sl.draw_rect(track_rect, Color(0.03, 0.045, 0.085, 0.96), true)
+
+	# Progressive active fill bar behind the thumb
+	var fill_w := clampf(thumb_x - 2.0, 0.0, track_rect.size.x)
+	if fill_w > 1.0:
+		var fill_rect := Rect2(track_rect.position, Vector2(fill_w, track_rect.size.y))
+		var fill_alpha := 0.24 if unlocked else lerpf(0.08, 0.20, ratio)
+		sl.draw_rect(fill_rect, Color(accent_col.r, accent_col.g, accent_col.b, fill_alpha), true)
+
+	var border_col := (
+		Color(green_col.r, green_col.g, green_col.b, 0.92)
+		if unlocked
+		else Color(accent_col.r, accent_col.g, accent_col.b, lerpf(0.45, 0.85, ratio))
+	)
+	sl.draw_rect(track_rect, border_col, false, 1.8 if unlocked else 1.4)
+
+	# 2. Target Hex Socket on the right end of the track
+	var socket_center := Vector2(end_x, cy)
+	var socket_r := thumb_r * 0.86
+	var socket_hex := PackedVector2Array()
+	socket_hex.resize(7)
+	for i in range(6):
+		var a := TAU * float(i) / 6.0
+		socket_hex[i] = socket_center + Vector2(cos(a), sin(a)) * socket_r
+	socket_hex[6] = socket_hex[0]
+	var socket_col := Color(green_col.r, green_col.g, green_col.b, 0.55 if unlocked else 0.28)
+	sl.draw_colored_polygon(socket_hex.slice(0, 6), Color(green_col.r, green_col.g, green_col.b, 0.06))
+	sl.draw_polyline(socket_hex, socket_col, 1.3, aa)
+
+	# Subtle '+' target crosshair inside the destination socket before docking
+	if not unlocked:
+		var cross_arm := 4.0
+		sl.draw_line(
+			socket_center + Vector2(-cross_arm, 0.0),
+			socket_center + Vector2(cross_arm, 0.0),
+			socket_col,
+			1.4,
+			aa
+		)
+		sl.draw_line(
+			socket_center + Vector2(0.0, -cross_arm),
+			socket_center + Vector2(0.0, cross_arm),
+			socket_col,
+			1.4,
+			aa
+		)
+
+	# 3. Animated marching chevrons & in-track status label
+	var font := ThemeDB.fallback_font
+	if not unlocked:
+		var text_alpha := clampf(1.0 - ratio * 1.45, 0.0, 1.0)
+		if font != null and text_alpha > 0.02:
+			var label_str := "SLIDE TO UNLOCK"
+			var font_sz := 12
+			var str_w := font.get_string_size(label_str, HORIZONTAL_ALIGNMENT_LEFT, -1, font_sz).x
+			var text_x := (s.x - str_w) * 0.5 + 4.0
+			var shimmer := 0.78 + 0.22 * sin(_slider_anim_time * 4.0)
+			var text_col := Color(0.68, 0.86, 1.0, text_alpha * shimmer)
+			sl.draw_string(
+				font,
+				Vector2(text_x, cy + 4.5),
+				label_str,
+				HORIZONTAL_ALIGNMENT_LEFT,
+				-1,
+				font_sz,
+				text_col
+			)
+
+		# Marching wave chevrons '>>' along the right side of the track
+		var chev_positions := [end_x - 48.0, end_x - 36.0, end_x - 24.0]
+		for idx in range(chev_positions.size()):
+			var cx_pos: float = chev_positions[idx]
+			if cx_pos <= thumb_x + thumb_r + 8.0:
+				continue
+			var wave := 0.5 + 0.5 * sin(_slider_anim_time * 5.5 - float(idx) * 0.85)
+			var c_alpha := lerpf(0.18, 0.78, wave) * clampf(1.0 - ratio * 1.2, 0.0, 1.0)
+			var c_col := Color(cyan_col.r, cyan_col.g, cyan_col.b, c_alpha)
+			var cw := 3.8
+			var ch := 4.8
+			var chev := PackedVector2Array([
+				Vector2(cx_pos - cw * 0.5, cy - ch),
+				Vector2(cx_pos + cw * 0.5, cy),
+				Vector2(cx_pos - cw * 0.5, cy + ch),
+			])
+			sl.draw_polyline(chev, c_col, 1.7, aa)
+	else:
+		if font != null:
+			var unlocked_str := "UNLOCKED — PRESS + TO START"
+			var font_sz := 12
+			var str_w := font.get_string_size(unlocked_str, HORIZONTAL_ALIGNMENT_LEFT, -1, font_sz).x
+			var text_x := maxf((thumb_x - thumb_r - str_w) * 0.5 + 6.0, 12.0)
+			sl.draw_string(
+				font,
+				Vector2(text_x, cy + 4.5),
+				unlocked_str,
+				HORIZONTAL_ALIGNMENT_LEFT,
+				-1,
+				font_sz,
+				Color(green_col.r, green_col.g, green_col.b, 0.98)
+			)
+
+	# 4. Large tactile faceted Hexagon Grabber Handle
+	var nudge_x := (1.6 * sin(_slider_anim_time * 4.5)) if (ratio < 0.03 and not unlocked) else 0.0
+	var thumb_center := Vector2(thumb_x + nudge_x, cy)
+
+	# Subtle breathing outer halo when waiting at the left start position
+	if ratio < 0.05 and not unlocked:
+		var pulse := 0.5 + 0.5 * sin(_slider_anim_time * 4.5)
+		var halo_r := thumb_r + 2.0 + 2.2 * pulse
+		var halo_hex := PackedVector2Array()
+		halo_hex.resize(7)
+		for i in range(6):
+			var a := TAU * float(i) / 6.0
+			halo_hex[i] = thumb_center + Vector2(cos(a), sin(a)) * halo_r
+		halo_hex[6] = halo_hex[0]
+		sl.draw_polyline(
+			halo_hex,
+			Color(cyan_col.r, cyan_col.g, cyan_col.b, 0.45 * (1.0 - pulse * 0.5)),
+			1.5,
+			aa
+		)
+
+	var hex_outer := PackedVector2Array()
+	var hex_inner := PackedVector2Array()
+	hex_outer.resize(7)
+	hex_inner.resize(6)
+	for i in range(6):
+		var a := TAU * float(i) / 6.0
+		var dir := Vector2(cos(a), sin(a))
+		hex_outer[i] = thumb_center + dir * thumb_r
+		hex_inner[i] = thumb_center + dir * (thumb_r * 0.68)
+	hex_outer[6] = hex_outer[0]
+
+	var core_fill := Color(0.06, 0.25, 0.18, 0.98) if unlocked else Color(0.05, 0.16, 0.26, 0.98)
+	sl.draw_colored_polygon(hex_outer.slice(0, 6), core_fill)
+
+	# Faceted bevel highlight on top half of the hexagon thumb
+	var top_bevel := PackedVector2Array([
+		hex_outer[3],
+		hex_outer[4],
+		hex_outer[5],
+		hex_outer[0],
+		hex_inner[0],
+		hex_inner[5],
+		hex_inner[4],
+		hex_inner[3],
+	])
+	sl.draw_colored_polygon(
+		top_bevel,
+		Color(accent_col.r, accent_col.g, accent_col.b, 0.26)
+	)
+	sl.draw_colored_polygon(
+		hex_inner,
+		Color(accent_col.r, accent_col.g, accent_col.b, 0.16)
+	)
+	sl.draw_polyline(hex_outer, accent_col, 2.2, aa)
+
+	# Double '>>' grabber arrows (or checkmark when unlocked) inside the Hex Thumb
+	var icon_col := Color(0.92, 1.0, 0.96, 1.0) if unlocked else Color(0.90, 0.98, 1.0, 0.98)
+	if unlocked:
+		var check_pts := PackedVector2Array([
+			thumb_center + Vector2(-5.5, 0.5),
+			thumb_center + Vector2(-1.2, 4.8),
+			thumb_center + Vector2(6.2, -4.5),
+		])
+		sl.draw_polyline(check_pts, icon_col, 2.5, aa)
+	else:
+		for offset_x in [-3.2, 2.8]:
+			var acx: float = thumb_center.x + offset_x
+			var arrow := PackedVector2Array([
+				Vector2(acx - 2.2, cy - 4.8),
+				Vector2(acx + 2.4, cy),
+				Vector2(acx - 2.2, cy + 4.8),
+			])
+			sl.draw_polyline(arrow, icon_col, 2.1, aa)
+
+
 ## Draws a red 'X' icon on the New Game modal Cancel button.
 func _on_cancel_new_game_button_draw() -> void:
 	var btn := cancel_new_game_button
@@ -636,6 +1096,9 @@ func _refresh_hud() -> void:
 
 func _update_telemetry(piece: PieceData, hovered_move: GameRules.VectorMove) -> void:
 	if piece == null:
+		if _is_compact_ui:
+			telemetry_label.text = "Tap a piece to inspect its legal hex vectors."
+			return
 		var mode_desc: String
 		if is_single_player:
 			var cpu_col := "Magenta (#2)" if human_team == PieceData.Team.CYAN else "Cyan (#1)"
@@ -794,6 +1257,8 @@ func _update_new_game_modal_state(val: float) -> void:
 	confirm_new_game_button.disabled = not unlocked
 	cancel_new_game_button.text = ""
 	confirm_new_game_button.text = ""
+	if confirm_slider != null:
+		confirm_slider.queue_redraw()
 	cancel_new_game_button.queue_redraw()
 	confirm_new_game_button.queue_redraw()
 

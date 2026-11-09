@@ -61,6 +61,7 @@ grow_vertical = 2
 script = ExtResource("1_main")
 
 [node name="MarginContainer" type="MarginContainer" parent="."]
+unique_name_in_owner = true
 layout_mode = 1
 anchors_preset = 15
 anchor_right = 1.0
@@ -91,10 +92,12 @@ layout_mode = 2
 theme_override_styles/panel = SubResource("StyleBoxFlat_panel")
 
 [node name="VBox" type="VBoxContainer" parent="MarginContainer/MainLayout/SidePanel"]
+unique_name_in_owner = true
 layout_mode = 2
 theme_override_constants/separation = 10
 
 [node name="TitleLabel" type="Label" parent="MarginContainer/MainLayout/SidePanel/VBox"]
+unique_name_in_owner = true
 layout_mode = 2
 theme_override_colors/font_color = Color(0.92, 0.96, 1, 1)
 theme_override_font_sizes/font_size = 24
@@ -108,6 +111,7 @@ theme_override_font_sizes/font_size = 13
 text = "Glinski Hexagonal Chess - 91 Hexes"
 
 [node name="HSeparator1" type="HSeparator" parent="MarginContainer/MainLayout/SidePanel/VBox"]
+unique_name_in_owner = true
 layout_mode = 2
 
 [node name="StatusLabel" type="Label" parent="MarginContainer/MainLayout/SidePanel/VBox"]
@@ -129,27 +133,32 @@ theme_override_font_sizes/font_size = 13
 text = "PROMOTE PAWN TO:"
 
 [node name="PromoteGrid" type="GridContainer" parent="MarginContainer/MainLayout/SidePanel/VBox/PromotionBox"]
+unique_name_in_owner = true
 layout_mode = 2
 theme_override_constants/h_separation = 6
 theme_override_constants/v_separation = 6
 columns = 4
 
 [node name="PromoteQueenBtn" type="Button" parent="MarginContainer/MainLayout/SidePanel/VBox/PromotionBox/PromoteGrid"]
+custom_minimum_size = Vector2(0, 40)
 layout_mode = 2
 size_flags_horizontal = 3
 text = "Queen"
 
 [node name="PromoteRookBtn" type="Button" parent="MarginContainer/MainLayout/SidePanel/VBox/PromotionBox/PromoteGrid"]
+custom_minimum_size = Vector2(0, 40)
 layout_mode = 2
 size_flags_horizontal = 3
 text = "Rook"
 
 [node name="PromoteBishopBtn" type="Button" parent="MarginContainer/MainLayout/SidePanel/VBox/PromotionBox/PromoteGrid"]
+custom_minimum_size = Vector2(0, 40)
 layout_mode = 2
 size_flags_horizontal = 3
 text = "Bishop"
 
 [node name="PromoteKnightBtn" type="Button" parent="MarginContainer/MainLayout/SidePanel/VBox/PromotionBox/PromoteGrid"]
+custom_minimum_size = Vector2(0, 40)
 layout_mode = 2
 size_flags_horizontal = 3
 text = "Knight"
@@ -164,9 +173,11 @@ fit_content = true
 scroll_active = false
 
 [node name="HSeparator2" type="HSeparator" parent="MarginContainer/MainLayout/SidePanel/VBox"]
+unique_name_in_owner = true
 layout_mode = 2
 
 [node name="HistoryHeader" type="Label" parent="MarginContainer/MainLayout/SidePanel/VBox"]
+unique_name_in_owner = true
 layout_mode = 2
 theme_override_colors/font_color = Color(0.65, 0.75, 0.88, 1)
 theme_override_font_sizes/font_size = 13
@@ -216,15 +227,15 @@ tooltip_text = "Vectors: ON (Click to Hide)"
 
 [node name="TogglePanelButton" type="Button" parent="."]
 unique_name_in_owner = true
-custom_minimum_size = Vector2(36, 36)
+custom_minimum_size = Vector2(44, 44)
 layout_mode = 1
 anchors_preset = 1
 anchor_left = 1.0
 anchor_right = 1.0
-offset_left = -60.0
+offset_left = -68.0
 offset_top = 24.0
 offset_right = -24.0
-offset_bottom = 60.0
+offset_bottom = 68.0
 grow_horizontal = 0
 tooltip_text = "Hide Side Panel"
 
@@ -248,15 +259,18 @@ grow_horizontal = 2
 grow_vertical = 2
 
 [node name="ModalPanel" type="PanelContainer" parent="NewGameModal/CenterContainer"]
+unique_name_in_owner = true
 custom_minimum_size = Vector2(380, 0)
 layout_mode = 2
 theme_override_styles/panel = SubResource("StyleBoxFlat_modal")
 
 [node name="ModalVBox" type="VBoxContainer" parent="NewGameModal/CenterContainer/ModalPanel"]
+unique_name_in_owner = true
 layout_mode = 2
 theme_override_constants/separation = 12
 
 [node name="ModalTitle" type="Label" parent="NewGameModal/CenterContainer/ModalPanel/ModalVBox"]
+unique_name_in_owner = true
 layout_mode = 2
 theme_override_colors/font_color = Color(0.95, 0.98, 1, 1)
 theme_override_font_sizes/font_size = 20
@@ -360,6 +374,7 @@ layout_mode = 2
 
 [node name="SliderHintLabel" type="Label" parent="NewGameModal/CenterContainer/ModalPanel/ModalVBox"]
 unique_name_in_owner = true
+visible = false
 layout_mode = 2
 theme_override_font_sizes/font_size = 13
 text = "Slide all the way right to unlock >>"
@@ -367,10 +382,11 @@ horizontal_alignment = 1
 
 [node name="ConfirmSlider" type="HSlider" parent="NewGameModal/CenterContainer/ModalPanel/ModalVBox"]
 unique_name_in_owner = true
-custom_minimum_size = Vector2(0, 32)
+custom_minimum_size = Vector2(0, 48)
 layout_mode = 2
 max_value = 100.0
 step = 1.0
+tooltip_text = "Grab and slide the hexagon all the way right to unlock"
 
 [node name="ModalButtons" type="HBoxContainer" parent="NewGameModal/CenterContainer/ModalPanel/ModalVBox"]
 layout_mode = 2

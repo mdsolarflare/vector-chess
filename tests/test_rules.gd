@@ -3,6 +3,7 @@ extends SceneTree
 ## Run with: godot --headless -s res://tests/test_rules.gd
 
 const MainScript = preload("res://scripts/main.gd")
+const MainScene = preload("res://scenes/main.tscn")
 
 var _tests_run: int = 0
 var _tests_failed: int = 0
@@ -22,6 +23,7 @@ func _init() -> void:
 	_test_ai_player_move_selection()
 	_test_software_renderer_detection()
 	_test_vector_board_caching_and_idle_redraw()
+	_test_mobile_scaling_and_responsive_layout()
 
 	print("========================================")
 	print("Tests run: %d | Failed: %d" % [_tests_run, _tests_failed])
@@ -362,3 +364,113 @@ func _test_vector_board_caching_and_idle_redraw() -> void:
 		"VectorBoard is_animating() is true while moved piece interpolates to target hex"
 	)
 	board.free()
+
+
+func _test_mobile_scaling_and_responsive_layout() -> void:
+	print("\n-- Mobile Scaling & Responsive Layout --")
+	# 1. Environment detection
+	_assert(
+		not MainScript.is_mobile_environment(false, false, false, Vector2i(1280, 800)),
+		"Desktop 1280x800 is not flagged as mobile"
+	)
+	_assert(
+		not MainScript.is_mobile_environment(false, false, true, Vector2i(1280, 800)),
+		"Desktop touchscreen laptop at 1280x800 is not flagged as mobile"
+	)
+	_assert(
+		MainScript.is_mobile_environment(true, false, true, Vector2i(1080, 2400)),
+		"Native Android/iOS portrait 1080x2400 is flagged as mobile"
+	)
+	_assert(
+		MainScript.is_mobile_environment(true, false, true, Vector2i(2400, 1080)),
+		"Native Android/iOS landscape 2400x1080 is flagged as mobile"
+	)
+	_assert(
+		MainScript.is_mobile_environment(false, true, true, Vector2i(390, 844)),
+		"Mobile Web touch portrait 390x844 is flagged as mobile"
+	)
+	_assert(
+		MainScript.is_mobile_environment(false, true, true, Vector2i(844, 390)),
+		"Mobile Web touch landscape 844x390 is flagged as mobile"
+	)
+
+	# 2. Content scale size calculation
+	_assert(
+		MainScript.compute_target_content_scale_size(Vector2i(1920, 1080), false) == Vector2i(1280, 800),
+		"Desktop landscape keeps 1280x800 content_scale_size"
+	)
+	_assert(
+		MainScript.compute_target_content_scale_size(Vector2i(800, 1280), false) == Vector2i(800, 1280),
+		"Desktop portrait swaps to 800x1280 content_scale_size"
+	)
+	_assert(
+		MainScript.compute_target_content_scale_size(Vector2i(1080, 2400), true) == Vector2i(480, 800),
+		"Mobile portrait uses 480x800 content_scale_size (~2.67x larger UI than 1280-wide portrait)"
+	)
+	_assert(
+		MainScript.compute_target_content_scale_size(Vector2i(2400, 1080), true) == Vector2i(800, 480),
+		"Mobile landscape uses 800x480 content_scale_size (~1.67x larger UI with matching physical scale)"
+	)
+
+	# 3. Scene layout adaptation across Desktop, Mobile Portrait, and Mobile Landscape
+	var main_ui: Control = MainScene.instantiate()
+	root.add_child(main_ui)
+	main_ui._resolve_nodes()
+	main_ui._setup_confirm_slider_theme()
+
+	# Desktop Landscape (1280x800)
+	main_ui._apply_responsive_layout(Vector2(1280, 800), false)
+	_assert(
+		not main_ui.split_container.vertical
+		and main_ui.side_panel.custom_minimum_size == Vector2(340, 0)
+		and main_ui.title_label.visible
+		and main_ui.controls_grid.columns == 2
+		and main_ui.toggle_panel_button.size == Vector2(44, 44)
+		and main_ui.confirm_slider.custom_minimum_size.y == 48.0,
+		"Desktop 1280x800 layout preserves horizontal split, 340px side panel, title header, 2-col controls, 44x44 toggle button, and 48px slide-to-unlock track"
+	)
+
+	# Mobile Portrait (480x1040 logical)
+	main_ui._apply_responsive_layout(Vector2(480, 1040), true)
+	_assert(
+		main_ui.split_container.vertical
+		and main_ui.side_panel.custom_minimum_size == Vector2(0, 176)
+		and not main_ui.title_label.visible
+		and not main_ui.history_header.visible
+		and main_ui.controls_grid.columns == 4
+		and main_ui.toggle_panel_button.size == Vector2(54, 54)
+		and main_ui.confirm_slider.custom_minimum_size.y == 48.0,
+		"Mobile Portrait 480x1040 layout stacks vertically, compacts dock to 176px, hides decorative headers, uses 4-col controls, and enlarges toggle button to 54x54"
+	)
+
+	# Mobile Landscape (1040x480 logical)
+	main_ui._apply_responsive_layout(Vector2(1040, 480), true)
+	_assert(
+		not main_ui.split_container.vertical
+		and main_ui.side_panel.custom_minimum_size == Vector2(248, 0)
+		and not main_ui.title_label.visible
+		and main_ui.controls_grid.columns == 4
+		and main_ui.promote_grid.columns == 2
+		and not main_ui.modal_description.visible
+		and main_ui.toggle_panel_button.size == Vector2(54, 54)
+		and main_ui.confirm_slider.custom_minimum_size.y == 44.0,
+		"Mobile Landscape 1040x480 layout narrows side panel to 248px, uses 4-col controls, 2-col promotion grid, 54x54 toggle button, and compacts NewGameModal height"
+	)
+
+	# 4. Slide-to-Unlock custom theme & idle animation behavior
+	main_ui.new_game_modal.visible = true
+	var anim_before: float = main_ui._slider_anim_time
+	main_ui._process(0.05)
+	_assert(
+		main_ui._slider_anim_time > anim_before,
+		"ConfirmSlider animates marching chevrons and thumb halo while NewGameModal is visible"
+	)
+	main_ui.new_game_modal.visible = false
+	var anim_paused: float = main_ui._slider_anim_time
+	main_ui._process(0.05)
+	_assert(
+		main_ui._slider_anim_time == anim_paused,
+		"ConfirmSlider animation pauses with zero overhead when NewGameModal is closed"
+	)
+
+	main_ui.free()
