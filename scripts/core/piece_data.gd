@@ -19,6 +19,13 @@ enum Type {
 	KING
 }
 
+const COLOR_CYAN := Color(0.0, 0.94, 1.0, 1.0)
+const COLOR_MAGENTA := Color(1.0, 0.16, 0.52, 1.0)
+const MESH_REF_RADIUS: float = 20.0
+
+static var _faceted_mesh_cache: Dictionary = {}
+static var _piece_array_mesh_cache: Dictionary = {}
+
 var id: int
 var team: Team
 var type: Type
@@ -91,11 +98,134 @@ static func get_piece_scale(p_type: Type) -> float:
 	return 0.70
 
 
+## Returns a cached 2D ArrayMesh (PRIMITIVE_TRIANGLES with vertex colors) in normalized unit-radius space
+## for the given piece `(p_type, p_team, is_selected)` combination.
+static func get_piece_array_mesh(p_type: Type, p_team: Team, is_selected: bool = false) -> ArrayMesh:
+	var cache_key: int = int(p_type) * 4 + int(p_team) * 2 + (1 if is_selected else 0)
+	if _piece_array_mesh_cache.has(cache_key):
+		return _piece_array_mesh_cache[cache_key]
+
+	var primary := COLOR_CYAN if p_team == Team.CYAN else COLOR_MAGENTA
+	var dark_base := Color(0.03, 0.04, 0.08, 0.96)
+	var bright_highlight := primary.lightened(0.45)
+
+	var mesh_def := get_faceted_mesh(p_type)
+	var facets: Array = mesh_def["facets"]
+	var outlines: Array = mesh_def["outlines"]
+	var accents: Array = mesh_def["accents"]
+
+	var verts := PackedVector2Array()
+	var colors := PackedColorArray()
+
+	var crease_col := Color(primary.lightened(0.25), 0.35)
+	var crease_w := 1.1 / MESH_REF_RADIUS
+
+	# 1. Triangulate each low-poly facet + internal crease line in painter's order
+	for f in facets:
+		var norm_poly: PackedVector2Array = f["poly"]
+		var shade: float = f["shade"]
+		if is_selected:
+			shade = clampf(shade + 0.12, 0.0, 1.0)
+
+		var facet_col: Color
+		if shade < 0.65:
+			var t := shade / 0.65
+			facet_col = dark_base.lerp(primary.darkened(0.15), t)
+		else:
+			var t := (shade - 0.65) / 0.35
+			facet_col = primary.darkened(0.15).lerp(bright_highlight, t)
+		facet_col.a = 0.96
+
+		_append_polygon_triangles(verts, colors, norm_poly, facet_col)
+
+		var crease := norm_poly.duplicate()
+		crease.append(norm_poly[0])
+		_append_polyline_triangles(verts, colors, crease, crease_w, crease_col)
+
+	# 2. Outer glowing silhouette contour & crisp inner rim
+	var glow_col := Color(primary, 0.38)
+	var glow_w := 3.6 / MESH_REF_RADIUS
+	var rim_col := Color(1.0, 1.0, 1.0, 0.95) if is_selected else primary.lightened(0.22)
+	var rim_w := 1.7 / MESH_REF_RADIUS
+
+	for norm_outline in outlines:
+		_append_polyline_triangles(verts, colors, norm_outline, glow_w, glow_col)
+		_append_polyline_triangles(verts, colors, norm_outline, rim_w, rim_col)
+
+	# 3. Bright geometric accents (Knight eye, Bishop cleft slash, Queen crown pearls)
+	var accent_col := Color(1.0, 1.0, 1.0, 0.92)
+	var accent_w := 1.6 / MESH_REF_RADIUS
+	for norm_accent in accents:
+		_append_polyline_triangles(verts, colors, norm_accent, accent_w, accent_col)
+
+	var arrays := []
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = verts
+	arrays[Mesh.ARRAY_COLOR] = colors
+
+	var array_mesh := ArrayMesh.new()
+	array_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+	_piece_array_mesh_cache[cache_key] = array_mesh
+	return array_mesh
+
+
+static func _append_polygon_triangles(
+	verts: PackedVector2Array,
+	colors: PackedColorArray,
+	poly: PackedVector2Array,
+	col: Color
+) -> void:
+	for i in range(1, poly.size() - 1):
+		verts.append(poly[0])
+		verts.append(poly[i])
+		verts.append(poly[i + 1])
+		colors.append(col)
+		colors.append(col)
+		colors.append(col)
+
+
+static func _append_polyline_triangles(
+	verts: PackedVector2Array,
+	colors: PackedColorArray,
+	points: PackedVector2Array,
+	norm_width: float,
+	col: Color
+) -> void:
+	var hw := norm_width * 0.5
+	for i in range(points.size() - 1):
+		var p0 := points[i]
+		var p1 := points[i + 1]
+		var diff := p1 - p0
+		var seg_len := diff.length()
+		if seg_len < 0.0001:
+			continue
+		var dir := diff / seg_len
+		var normal := Vector2(-dir.y, dir.x) * hw
+		var cap := dir * (hw * 0.35)
+
+		var a := p0 - cap + normal
+		var b := p0 - cap - normal
+		var c := p1 + cap - normal
+		var d := p1 + cap + normal
+
+		verts.append(a)
+		verts.append(b)
+		verts.append(c)
+		verts.append(a)
+		verts.append(c)
+		verts.append(d)
+		for _k in range(6):
+			colors.append(col)
+
+
 ## Returns a dictionary describing the Option A Low-Poly Faceted Staunton silhouette:
 ## - "facets": Array[Dictionary] with {"poly": PackedVector2Array, "shade": float}
 ## - "outlines": Array[PackedVector2Array] closed polylines for glowing outer/inner silhouette edges
 ## - "accents": Array[PackedVector2Array] bright highlight polylines/gems
 static func get_faceted_mesh(p_type: Type) -> Dictionary:
+	if _faceted_mesh_cache.has(p_type):
+		return _faceted_mesh_cache[p_type]
+
 	var facets: Array[Dictionary] = []
 	var outlines: Array[PackedVector2Array] = []
 	var accents: Array[PackedVector2Array] = []
@@ -351,11 +481,13 @@ static func get_faceted_mesh(p_type: Type) -> Dictionary:
 				Vector2(0.52, 0.52), Vector2(0.68, 0.76), Vector2(-0.68, 0.76)
 			]))
 
-	return {
+	var result := {
 		"facets": facets,
 		"outlines": outlines,
 		"accents": accents,
 	}
+	_faceted_mesh_cache[p_type] = result
+	return result
 
 
 static func _add_facet(facets: Array[Dictionary], pts: Array, shade: float) -> void:
