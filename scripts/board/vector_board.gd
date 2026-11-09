@@ -29,9 +29,19 @@ var legal_moves: Array[GameRules.VectorMove] = []
 var hovered_cell: Vector2i = GameRules.INVALID_HEX
 var hovered_move: GameRules.VectorMove = null
 var pending_promotion_move: GameRules.VectorMove = null
-var board_flipped: bool = false
+var board_flipped: bool = false:
+	set(value):
+		if board_flipped != value:
+			board_flipped = value
+			_request_bg_redraw()
+			queue_redraw()
 var show_vectors: bool = true
-var show_cell_coords: bool = true
+var show_cell_coords: bool = true:
+	set(value):
+		if show_cell_coords != value:
+			show_cell_coords = value
+			_request_bg_redraw()
+			queue_redraw()
 var input_locked: bool = false
 
 var _board_center: Vector2 = Vector2.ZERO
@@ -39,19 +49,69 @@ var _hex_radius: float = 28.0
 var _pulse_time: float = 0.0
 var _bursts: Array[Dictionary] = []
 var _all_cells: Array[Vector2i] = []
+var _cell_meta: Array[Dictionary] = []
 var _cached_turn_moves: Dictionary = {}
 var _cached_check_kings: Array[PieceData] = []
+var _bg_layer: Control = null
+
+
+func _init() -> void:
+	_init_cell_metadata()
 
 
 func _ready() -> void:
 	mouse_filter = Control.MOUSE_FILTER_STOP
-	_all_cells = GameRules.get_all_board_cells()
+	_init_cell_metadata()
+	_setup_bg_layer()
+	resized.connect(_on_board_resized)
 	_rebuild_board_cache()
 	set_process(true)
 
 
+func _init_cell_metadata() -> void:
+	if not _cell_meta.is_empty():
+		return
+	_all_cells = GameRules.get_all_board_cells()
+	_cell_meta.resize(_all_cells.size())
+	for i in range(_all_cells.size()):
+		var cell := _all_cells[i]
+		_cell_meta[i] = {
+			"cell": cell,
+			"color_idx": GameRules.get_cell_color_index(cell),
+			"is_pawn_start": (
+				rules.is_pawn_start_cell(PieceData.Team.CYAN, cell)
+				or rules.is_pawn_start_cell(PieceData.Team.MAGENTA, cell)
+			),
+			"algebraic": GameRules.coord_to_algebraic(cell),
+		}
+
+
+func _setup_bg_layer() -> void:
+	if _bg_layer != null:
+		return
+	_bg_layer = Control.new()
+	_bg_layer.name = "BoardBackgroundLayer"
+	_bg_layer.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_bg_layer.show_behind_parent = true
+	_bg_layer.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	_bg_layer.draw.connect(_on_bg_layer_draw)
+	add_child(_bg_layer)
+
+
+func _on_board_resized() -> void:
+	_compute_board_metrics()
+	_request_bg_redraw()
+	queue_redraw()
+
+
+func _request_bg_redraw() -> void:
+	if _bg_layer != null:
+		_bg_layer.queue_redraw()
+
+
 func set_line_antialiasing(enabled: bool) -> void:
 	line_aa_enabled = enabled
+	_request_bg_redraw()
 	queue_redraw()
 
 
@@ -142,7 +202,6 @@ func execute_ai_move(move: GameRules.VectorMove) -> void:
 
 func toggle_flip_board() -> void:
 	board_flipped = not board_flipped
-	queue_redraw()
 
 
 func toggle_vector_overlay() -> bool:
@@ -243,31 +302,45 @@ func _update_hovered_move() -> void:
 	selection_changed.emit(selected_piece, hovered_move)
 
 
-func _draw() -> void:
+func _on_bg_layer_draw() -> void:
 	_compute_board_metrics()
+	_draw_board_background_on(_bg_layer)
 
+
+func _draw_board_background_on(canvas: CanvasItem) -> void:
 	var hex_colors: Array[Color] = [COLOR_HEX_0, COLOR_HEX_1, COLOR_HEX_2]
 
 	# 1. Draw all 91 hexagonal cells with 3-color tiling
-	for cell in _all_cells:
+	for meta in _cell_meta:
+		var cell: Vector2i = meta["cell"]
+		var col_idx: int = meta["color_idx"]
+		var is_pawn_start: bool = meta["is_pawn_start"]
+
 		var center := _axial_to_screen(Vector2(cell))
-		var col_idx := GameRules.get_cell_color_index(cell)
 		var poly := _make_hex_polygon(center, _hex_radius)
-		draw_colored_polygon(poly, hex_colors[col_idx])
+		canvas.draw_colored_polygon(poly, hex_colors[col_idx])
 
 		var outline := poly.duplicate()
 		outline.append(poly[0])
-		draw_polyline(outline, COLOR_GRID_LINE, 1.3, line_aa_enabled)
+		canvas.draw_polyline(outline, COLOR_GRID_LINE, 1.3, line_aa_enabled)
 
 		# Subtle starting-pawn hex indicator
-		if rules.is_pawn_start_cell(PieceData.Team.CYAN, cell) or rules.is_pawn_start_cell(PieceData.Team.MAGENTA, cell):
+		if is_pawn_start:
 			var inner_hex := _make_hex_polygon(center, _hex_radius * 0.20)
 			inner_hex.append(inner_hex[0])
-			draw_polyline(inner_hex, Color(0.35, 0.5, 0.7, 0.20), 1.0, line_aa_enabled)
+			canvas.draw_polyline(inner_hex, Color(0.35, 0.5, 0.7, 0.20), 1.0, line_aa_enabled)
 
 	# 2. Draw coordinate labels
 	if show_cell_coords:
-		_draw_hex_coordinates()
+		_draw_hex_coordinates_on(canvas)
+
+
+func _draw() -> void:
+	_compute_board_metrics()
+
+	# Fallback if rendered without _bg_layer child node
+	if _bg_layer == null:
+		_draw_board_background_on(self)
 
 	# 3. Highlight last executed move
 	if rules.last_move != null:
@@ -330,7 +403,7 @@ func _draw() -> void:
 			3.0
 		)
 
-	# 8. Draw all pieces using Option A Low-Poly Faceted Silhouettes
+	# 8. Draw all pieces using pre-baked 2D ArrayMeshes
 	for p in rules.pieces:
 		_draw_polygon_piece(p)
 
@@ -367,63 +440,9 @@ static func draw_faceted_piece_icon(
 	radius: float,
 	is_selected: bool = false
 ) -> void:
-	var primary := COLOR_CYAN if p_team == PieceData.Team.CYAN else COLOR_MAGENTA
-	var dark_base := Color(0.03, 0.04, 0.08, 0.96)
-	var bright_highlight := primary.lightened(0.45)
-
-	var mesh := PieceData.get_faceted_mesh(p_type)
-	var facets: Array = mesh["facets"]
-	var outlines: Array = mesh["outlines"]
-	var accents: Array = mesh["accents"]
-
-	# 1. Draw each triangulated/quad low-poly facet with directional lighting + internal crease line
-	for f in facets:
-		var norm_poly: PackedVector2Array = f["poly"]
-		var shade: float = f["shade"]
-		if is_selected:
-			shade = clampf(shade + 0.12, 0.0, 1.0)
-
-		var world_poly := PackedVector2Array()
-		world_poly.resize(norm_poly.size())
-		for i in range(norm_poly.size()):
-			world_poly[i] = center + norm_poly[i] * radius
-
-		# Interpolate facet fill color from deep shadow through team color to bright highlight
-		var facet_col: Color
-		if shade < 0.65:
-			var t := shade / 0.65
-			facet_col = dark_base.lerp(primary.darkened(0.15), t)
-		else:
-			var t := (shade - 0.65) / 0.35
-			facet_col = primary.darkened(0.15).lerp(bright_highlight, t)
-		facet_col.a = 0.96
-
-		canvas.draw_colored_polygon(world_poly, facet_col)
-
-		# Subtle internal origami/crystal facet crease edge
-		var crease := world_poly.duplicate()
-		crease.append(world_poly[0])
-		canvas.draw_polyline(crease, Color(primary.lightened(0.25), 0.35), 1.1, line_aa_enabled)
-
-	# 2. Draw outer glowing silhouette contour
-	for norm_outline in outlines:
-		var world_outline := PackedVector2Array()
-		world_outline.resize(norm_outline.size())
-		for i in range(norm_outline.size()):
-			world_outline[i] = center + norm_outline[i] * radius
-
-		canvas.draw_polyline(world_outline, Color(primary, 0.38), 3.6, line_aa_enabled)
-		var rim_col := Color(1.0, 1.0, 1.0, 0.95) if is_selected else primary.lightened(0.22)
-		canvas.draw_polyline(world_outline, rim_col, 1.7, line_aa_enabled)
-
-	# 3. Draw bright geometric accents (Knight eye, Bishop cleft slash, Queen crown pearls)
-	var accent_col := Color(1.0, 1.0, 1.0, 0.92)
-	for norm_accent in accents:
-		var world_accent := PackedVector2Array()
-		world_accent.resize(norm_accent.size())
-		for i in range(norm_accent.size()):
-			world_accent[i] = center + norm_accent[i] * radius
-		canvas.draw_polyline(world_accent, accent_col, 1.6, line_aa_enabled)
+	var mesh := PieceData.get_piece_array_mesh(p_type, p_team, is_selected)
+	var xform := Transform2D(0.0, Vector2(radius, radius), 0.0, center)
+	canvas.draw_mesh(mesh, null, xform)
 
 
 func _draw_vector_arrow(from_pt: Vector2, to_pt: Vector2, color: Color, width: float, draw_label: bool) -> void:
@@ -455,7 +474,7 @@ func _draw_vector_arrow(from_pt: Vector2, to_pt: Vector2, color: Color, width: f
 		draw_string(ThemeDB.fallback_font, mid, label, HORIZONTAL_ALIGNMENT_CENTER, -1, 11, color.lightened(0.35))
 
 
-func _draw_hex_coordinates() -> void:
+func _draw_hex_coordinates_on(canvas: CanvasItem) -> void:
 	var font := ThemeDB.fallback_font
 	if font == null or _hex_radius < 16.0:
 		return
@@ -463,11 +482,12 @@ func _draw_hex_coordinates() -> void:
 	var font_size := clampi(int(_hex_radius * 0.34), 8, 11)
 	var label_col := Color(0.62, 0.75, 0.92, 0.42)
 
-	for cell in _all_cells:
+	for meta in _cell_meta:
+		var cell: Vector2i = meta["cell"]
+		var alg: String = meta["algebraic"]
 		var center := _axial_to_screen(Vector2(cell))
-		var alg := GameRules.coord_to_algebraic(cell)
 		var pos := center + Vector2(-_hex_radius * 0.46, -_hex_radius * 0.42)
-		draw_string(font, pos, alg, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size, label_col)
+		canvas.draw_string(font, pos, alg, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size, label_col)
 
 
 func _spawn_polygon_burst(cell: Vector2i, color: Color) -> void:
