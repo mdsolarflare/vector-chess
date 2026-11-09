@@ -14,6 +14,8 @@ const DIFFICULTY_NAMES: Array[String] = ["Easy", "Medium", "Hard"]
 
 const MATE_SCORE: int = 100000
 const INF_SCORE: int = 1000000
+## Frame time budget in microseconds (~8ms) before yielding on single-threaded Web builds
+const ASYNC_FRAME_BUDGET_USEC: int = 8000
 
 const PIECE_VALUES: Dictionary = {
 	PieceData.Type.PAWN: 100,
@@ -56,6 +58,66 @@ func choose_move(source_rules: GameRules, ai_team: PieceData.Team, difficulty: D
 	return legal_moves[0]
 
 
+## Time-sliced coroutine variant of `choose_move()` for single-threaded Web (WASM) builds.
+## Yields to `tree.process_frame` whenever elapsed frame time exceeds `ASYNC_FRAME_BUDGET_USEC`
+## so browser rendering and UI animations stay responsive while the CPU is thinking.
+func choose_move_async(
+	source_rules: GameRules,
+	ai_team: PieceData.Team,
+	difficulty: Difficulty,
+	tree: SceneTree
+) -> GameRules.VectorMove:
+	var state := source_rules.clone_state()
+	var legal_moves := _expand_promotions(state.get_all_legal_moves(ai_team))
+	if legal_moves.is_empty():
+		return null
+	if legal_moves.size() == 1:
+		return legal_moves[0]
+
+	if tree == null or difficulty == Difficulty.EASY:
+		return _choose_easy_move(state, legal_moves, ai_team) if difficulty == Difficulty.EASY else choose_move(state, ai_team, difficulty)
+
+	var max_depth := 2 if difficulty == Difficulty.MEDIUM else 3
+	var use_quiescence := (difficulty == Difficulty.HARD)
+	var jitter_range := 25 if difficulty == Difficulty.MEDIUM else 6
+
+	_order_moves(state, legal_moves)
+
+	var best_move: GameRules.VectorMove = legal_moves[0]
+	var best_score: int = -INF_SCORE
+	var alpha: int = -INF_SCORE
+	var beta: int = INF_SCORE
+	var slice_start_usec := Time.get_ticks_usec()
+
+	for mv in legal_moves:
+		if Time.get_ticks_usec() - slice_start_usec >= ASYNC_FRAME_BUDGET_USEC:
+			await tree.process_frame
+			slice_start_usec = Time.get_ticks_usec()
+
+		var undo := state.push_search_move(mv)
+		var score := -_negamax(
+			state,
+			max_depth - 1,
+			-beta,
+			-alpha,
+			state.current_turn,
+			1,
+			use_quiescence
+		)
+		state.pop_search_move(undo)
+
+		if jitter_range > 0 and absi(score) < MATE_SCORE - 100:
+			score += _rng.randi_range(-jitter_range, jitter_range)
+
+		if score > best_score:
+			best_score = score
+			best_move = mv
+		if score > alpha:
+			alpha = score
+
+	return best_move
+
+
 func _choose_easy_move(
 	state: GameRules,
 	legal_moves: Array[GameRules.VectorMove],
@@ -67,7 +129,7 @@ func _choose_easy_move(
 	for mv in legal_moves:
 		var undo := state.push_search_move(mv)
 		var enemy_team := state.current_turn
-		var enemy_moves := state.get_all_legal_moves(enemy_team)
+		var enemy_moves := state.get_all_legal_moves(enemy_team, false)
 		var score: int
 		if enemy_moves.is_empty():
 			if state.is_king_in_check(enemy_team):
@@ -92,7 +154,7 @@ func _choose_easy_move(
 func _choose_search_move(
 	state: GameRules,
 	legal_moves: Array[GameRules.VectorMove],
-	ai_team: PieceData.Team,
+	_ai_team: PieceData.Team,
 	max_depth: int,
 	use_quiescence: bool,
 	jitter_range: int
@@ -139,17 +201,18 @@ func _negamax(
 	ply: int,
 	use_quiescence: bool
 ) -> int:
-	var moves := _expand_promotions(state.get_all_legal_moves(perspective_team), false)
+	# Cut off at depth-0 leaf nodes BEFORE generating all legal moves
+	if depth <= 0:
+		if use_quiescence:
+			return _quiescence(state, alpha, beta, perspective_team, 1)
+		return evaluate_board(state, perspective_team)
+
+	var moves := _expand_promotions(state.get_all_legal_moves(perspective_team, false), false)
 	if moves.is_empty():
 		if state.is_king_in_check(perspective_team):
 			return -(MATE_SCORE - ply * 10)
 		# Glinski stalemate is 0.75 : 0.25 in favor of the stalemating player
 		return -250
-
-	if depth <= 0:
-		if use_quiescence:
-			return _quiescence(state, alpha, beta, perspective_team, 1)
-		return evaluate_board(state, perspective_team)
 
 	_order_moves(state, moves)
 
@@ -193,17 +256,8 @@ func _quiescence(
 	if q_depth <= 0:
 		return stand_pat
 
-	var all_moves := state.get_all_legal_moves(perspective_team)
-	if all_moves.is_empty():
-		if state.is_king_in_check(perspective_team):
-			return -(MATE_SCORE - 50)
-		return -250
-
-	var tactical_moves: Array[GameRules.VectorMove] = []
-	for mv in all_moves:
-		if mv.is_capture or mv.is_promotion:
-			tactical_moves.append(mv)
-
+	# Generate only tactical moves (captures & promotions), avoiding quiet move generation & legality checks
+	var tactical_moves := _expand_promotions(state.get_all_tactical_moves(perspective_team), false)
 	if tactical_moves.is_empty():
 		return stand_pat
 
@@ -254,11 +308,12 @@ static func evaluate_board(state: GameRules, perspective_team: PieceData.Team) -
 	elif magenta_bishops_mask in [0b011, 0b101, 0b110]:
 		magenta_score += 22
 
-	# Check pressure bonus
-	if state.is_king_in_check(PieceData.Team.MAGENTA):
-		cyan_score += 35
-	if state.is_king_in_check(PieceData.Team.CYAN):
-		magenta_score += 35
+	# Only the side to move (`state.current_turn`) can legally be in check after a legal move
+	if state.is_king_in_check(state.current_turn):
+		if state.current_turn == PieceData.Team.MAGENTA:
+			cyan_score += 35
+		else:
+			magenta_score += 35
 
 	var diff := cyan_score - magenta_score
 	return diff if perspective_team == PieceData.Team.CYAN else -diff
