@@ -5,8 +5,8 @@ extends Control
 ## displacement vector rays, and Option A Low-Poly Faceted Staunton piece silhouettes.
 
 signal move_executed(move: GameRules.VectorMove, notation: String)
-signal selection_changed(piece: PieceData, hovered_move: GameRules.VectorMove)
 signal promotion_requested(pending_move: GameRules.VectorMove, team: PieceData.Team)
+signal selection_changed(piece: PieceData, hovered_move: GameRules.VectorMove)
 
 const SQRT3: float = 1.73205080757
 
@@ -627,7 +627,8 @@ func _make_hex_polygon(center: Vector2, radius: float) -> PackedVector2Array:
 
 
 func _compute_board_metrics() -> void:
-	var padding := 20.0
+	var min_dim := minf(size.x, size.y)
+	var padding := 10.0 if min_dim < 540.0 else 20.0
 	var avail := size - Vector2(padding * 2.0, padding * 2.0)
 	var max_r_x := avail.x / 17.2
 	var max_r_y := avail.y / (11.2 * SQRT3)
