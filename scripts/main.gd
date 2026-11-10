@@ -1053,7 +1053,8 @@ func _check_and_trigger_ai_turn() -> void:
 		return
 
 	var ai_team := vector_board.rules.current_turn
-	var chosen_move := ai_player.choose_move(vector_board.rules, ai_team, ai_difficulty)
+	var state_snapshot := vector_board.rules.clone_state()
+	var chosen_move := await _compute_ai_move_non_blocking(state_snapshot, ai_team, ai_difficulty)
 	if session != _ai_session_id or not is_inside_tree():
 		return
 
@@ -1063,6 +1064,30 @@ func _check_and_trigger_ai_turn() -> void:
 		vector_board.execute_ai_move(chosen_move)
 	else:
 		_refresh_hud()
+
+
+## Runs AI move search off the main thread via WorkerThreadPool when threads are available,
+## or yields across frames on single-threaded Web (WASM) builds to prevent UI freezes.
+func _compute_ai_move_non_blocking(
+	state_snapshot: GameRules,
+	ai_team: PieceData.Team,
+	difficulty: AIPlayer.Difficulty
+) -> GameRules.VectorMove:
+	if not OS.has_feature("web") and OS.has_feature("threads"):
+		var result_holder: Array[GameRules.VectorMove] = [null]
+		var task_id := WorkerThreadPool.add_task(func() -> void:
+			var worker_ai := AIPlayer.new()
+			result_holder[0] = worker_ai.choose_move(state_snapshot, ai_team, difficulty)
+		)
+		while not WorkerThreadPool.is_task_completed(task_id):
+			if not is_inside_tree():
+				WorkerThreadPool.wait_for_task_completion(task_id)
+				return null
+			await get_tree().process_frame
+		WorkerThreadPool.wait_for_task_completion(task_id)
+		return result_holder[0]
+
+	return await ai_player.choose_move_async(state_snapshot, ai_team, difficulty, get_tree())
 
 
 func _refresh_hud() -> void:

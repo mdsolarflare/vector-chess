@@ -260,7 +260,7 @@ func clone_state() -> GameRules:
 
 
 ## Returns all legal moves for all pieces belonging to `team`.
-func get_all_legal_moves(team: PieceData.Team) -> Array[VectorMove]:
+func get_all_legal_moves(team: PieceData.Team, _build_rays: bool = true) -> Array[VectorMove]:
 	var all_moves: Array[VectorMove] = []
 	if is_game_over:
 		return all_moves
@@ -268,8 +268,28 @@ func get_all_legal_moves(team: PieceData.Team) -> Array[VectorMove]:
 		_rebuild_spatial_index()
 	for p in pieces:
 		if p.team == team:
-			all_moves.append_array(get_legal_moves_for_piece(p))
+			var pseudo_moves := _get_pseudo_legal_moves(p)
+			for mv in pseudo_moves:
+				if not _move_leaves_king_in_check(p, mv):
+					all_moves.append(mv)
 	return all_moves
+
+
+## Returns only legal tactical moves (captures and promotions) for `team`,
+## skipping quiet move allocations and legality checks during quiescence search.
+func get_all_tactical_moves(team: PieceData.Team) -> Array[VectorMove]:
+	var tactical_moves: Array[VectorMove] = []
+	if is_game_over:
+		return tactical_moves
+	if _indexed_piece_count != pieces.size():
+		_rebuild_spatial_index()
+	for p in pieces:
+		if p.team == team:
+			var pseudo := _get_pseudo_tactical_moves(p)
+			for mv in pseudo:
+				if not _move_leaves_king_in_check(p, mv):
+					tactical_moves.append(mv)
+	return tactical_moves
 
 
 ## Fast in-place move execution for AI search tree traversal (no string formatting or full array cloning).
@@ -650,7 +670,10 @@ func format_move_notation(piece: PieceData, move: VectorMove) -> String:
 	return "%s %s%s%s%s  d(%+d,%+d)" % [code, from_alg, sep, to_alg, suffix, move.delta.x, move.delta.y]
 
 
-func _get_pseudo_legal_moves(piece: PieceData, include_en_passant: bool = true) -> Array[VectorMove]:
+func _get_pseudo_legal_moves(
+	piece: PieceData,
+	include_en_passant: bool = true
+) -> Array[VectorMove]:
 	var moves: Array[VectorMove] = []
 	match piece.type:
 		PieceData.Type.PAWN:
@@ -720,6 +743,98 @@ func _get_pseudo_legal_moves(piece: PieceData, include_en_passant: bool = true) 
 				_try_add_step_move(piece, piece.grid_pos + d, moves)
 
 	return moves
+
+
+## Generates only pseudo-legal tactical moves (captures and promotions) for `piece`.
+func _get_pseudo_tactical_moves(piece: PieceData) -> Array[VectorMove]:
+	var moves: Array[VectorMove] = []
+	match piece.type:
+		PieceData.Type.PAWN:
+			var forward_dir := Vector2i(0, -1) if piece.team == PieceData.Team.CYAN else Vector2i(0, 1)
+			var one_step := piece.grid_pos + forward_dir
+			if (
+				is_inside_board(one_step)
+				and is_promotion_cell(piece.team, one_step)
+				and _grid[(one_step.x + BOARD_RADIUS) * GRID_SPAN + (one_step.y + BOARD_RADIUS)] == null
+			):
+				var mv := VectorMove.new(piece.id, piece.grid_pos, one_step)
+				mv.is_promotion = true
+				moves.append(mv)
+
+			var cap_dirs: Array[Vector2i] = (
+				CYAN_PAWN_CAP_DIRS if piece.team == PieceData.Team.CYAN else MAGENTA_PAWN_CAP_DIRS
+			)
+			for cd in cap_dirs:
+				var cap_pos := piece.grid_pos + cd
+				if not is_inside_board(cap_pos):
+					continue
+				var target := _grid[(cap_pos.x + BOARD_RADIUS) * GRID_SPAN + (cap_pos.y + BOARD_RADIUS)]
+				if target != null and target.team != piece.team:
+					var cmv := VectorMove.new(piece.id, piece.grid_pos, cap_pos)
+					cmv.is_capture = true
+					cmv.captured_piece_id = target.id
+					cmv.captured_pos = cap_pos
+					cmv.is_promotion = is_promotion_cell(piece.team, cap_pos)
+					moves.append(cmv)
+				elif cap_pos == en_passant_target and en_passant_pawn_id != -1:
+					var ep_pawn := get_piece_by_id(en_passant_pawn_id)
+					if ep_pawn != null and ep_pawn.team != piece.team:
+						var epmv := VectorMove.new(piece.id, piece.grid_pos, cap_pos)
+						epmv.is_capture = true
+						epmv.is_en_passant = true
+						epmv.captured_piece_id = ep_pawn.id
+						epmv.captured_pos = ep_pawn.grid_pos
+						moves.append(epmv)
+
+		PieceData.Type.KNIGHT:
+			for j in KNIGHT_DIRS:
+				_try_add_step_capture(piece, piece.grid_pos + j, moves)
+
+		PieceData.Type.BISHOP:
+			_add_sliding_captures(piece, DIAG_DIRS, moves)
+
+		PieceData.Type.ROOK:
+			_add_sliding_captures(piece, ORTHO_DIRS, moves)
+
+		PieceData.Type.QUEEN:
+			_add_sliding_captures(piece, ORTHO_DIRS, moves)
+			_add_sliding_captures(piece, DIAG_DIRS, moves)
+
+		PieceData.Type.KING:
+			for d in ORTHO_DIRS:
+				_try_add_step_capture(piece, piece.grid_pos + d, moves)
+			for d in DIAG_DIRS:
+				_try_add_step_capture(piece, piece.grid_pos + d, moves)
+
+	return moves
+
+
+func _try_add_step_capture(piece: PieceData, target_pos: Vector2i, moves: Array[VectorMove]) -> void:
+	if not is_inside_board(target_pos):
+		return
+	var occ := _grid[(target_pos.x + BOARD_RADIUS) * GRID_SPAN + (target_pos.y + BOARD_RADIUS)]
+	if occ != null and occ.team != piece.team:
+		var mv := VectorMove.new(piece.id, piece.grid_pos, target_pos)
+		mv.is_capture = true
+		mv.captured_piece_id = occ.id
+		mv.captured_pos = target_pos
+		moves.append(mv)
+
+
+func _add_sliding_captures(piece: PieceData, dirs: Array[Vector2i], moves: Array[VectorMove]) -> void:
+	for d in dirs:
+		var step_pos := piece.grid_pos + d
+		while is_inside_board(step_pos):
+			var occ := _grid[(step_pos.x + BOARD_RADIUS) * GRID_SPAN + (step_pos.y + BOARD_RADIUS)]
+			if occ != null:
+				if occ.team != piece.team:
+					var mv := VectorMove.new(piece.id, piece.grid_pos, step_pos)
+					mv.is_capture = true
+					mv.captured_piece_id = occ.id
+					mv.captured_pos = step_pos
+					moves.append(mv)
+				break
+			step_pos += d
 
 
 func _try_add_step_move(piece: PieceData, target_pos: Vector2i, moves: Array[VectorMove]) -> void:

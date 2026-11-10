@@ -341,13 +341,49 @@ func _test_piece_faceted_meshes() -> void:
 
 
 func _test_ai_player_move_selection() -> void:
-	print("\n-- AIPlayer Move Selection --")
+	print("\n-- AIPlayer Move Selection & Tactical Generator --")
 	var rules := GameRules.new()
 	var ai := AIPlayer.new()
+
+	# Opening position has zero captures or promotions
+	var initial_tactical := rules.get_all_tactical_moves(PieceData.Team.CYAN)
+	_assert(
+		initial_tactical.is_empty(),
+		"Opening position generates 0 tactical moves (avoids quiet move generation in quiescence)"
+	)
+
 	var easy_mv := ai.choose_move(rules, PieceData.Team.CYAN, AIPlayer.Difficulty.EASY)
 	var med_mv := ai.choose_move(rules, PieceData.Team.CYAN, AIPlayer.Difficulty.MEDIUM)
+	var t0 := Time.get_ticks_msec()
+	var hard_mv := ai.choose_move(rules, PieceData.Team.CYAN, AIPlayer.Difficulty.HARD)
+	var hard_ms := Time.get_ticks_msec() - t0
+
 	_assert(easy_mv != null, "AIPlayer (Easy) selects a valid opening move")
 	_assert(med_mv != null, "AIPlayer (Medium) selects a valid opening move")
+	_assert(hard_mv != null, "AIPlayer (Hard, depth 3 + quiescence) selects a valid opening move in %d ms" % hard_ms)
+
+	# Verify get_all_tactical_moves matches filtered get_all_legal_moves on a tactical board
+	var tac_rules := GameRules.new()
+	tac_rules.pieces.clear()
+	tac_rules._spawn_piece(PieceData.Team.CYAN, PieceData.Type.KING, GameRules.algebraic_to_axial("a1"))
+	tac_rules._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.KING, GameRules.algebraic_to_axial("l1"))
+	tac_rules._spawn_piece(PieceData.Team.CYAN, PieceData.Type.PAWN, GameRules.algebraic_to_axial("f10")) # Promotion on f11
+	tac_rules._spawn_piece(PieceData.Team.CYAN, PieceData.Type.KNIGHT, GameRules.algebraic_to_axial("f6"))
+	tac_rules._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.ROOK, GameRules.algebraic_to_axial("g8")) # Capturable by Knight
+
+	var all_legal := tac_rules.get_all_legal_moves(PieceData.Team.CYAN)
+	var expected_tactical := 0
+	for mv in all_legal:
+		if mv.is_capture or mv.is_promotion:
+			expected_tactical += 1
+	var actual_tactical := tac_rules.get_all_tactical_moves(PieceData.Team.CYAN)
+	_assert(
+		actual_tactical.size() == expected_tactical and expected_tactical >= 2,
+		"get_all_tactical_moves() matches exact legal capture/promotion count (%d == %d)" % [
+			actual_tactical.size(),
+			expected_tactical,
+		]
+	)
 
 
 func _test_software_renderer_detection() -> void:
