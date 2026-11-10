@@ -129,7 +129,7 @@ func _choose_easy_move(
 	for mv in legal_moves:
 		var undo := state.push_search_move(mv)
 		var enemy_team := state.current_turn
-		var enemy_moves := state.get_all_legal_moves(enemy_team, false)
+		var enemy_moves := state.get_all_legal_moves(enemy_team)
 		var score: int
 		if enemy_moves.is_empty():
 			if state.is_king_in_check(enemy_team):
@@ -207,7 +207,7 @@ func _negamax(
 			return _quiescence(state, alpha, beta, perspective_team, 1)
 		return evaluate_board(state, perspective_team)
 
-	var moves := _expand_promotions(state.get_all_legal_moves(perspective_team, false), false)
+	var moves := _expand_promotions(state.get_all_legal_moves(perspective_team), false)
 	if moves.is_empty():
 		if state.is_king_in_check(perspective_team):
 			return -(MATE_SCORE - ply * 10)

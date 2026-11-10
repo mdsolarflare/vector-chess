@@ -19,6 +19,7 @@ func _init() -> void:
 	_test_check_checkmate_and_stalemate()
 	_test_move_execution_and_undo()
 	_test_search_push_pop_consistency()
+	_test_spatial_index_and_reverse_attack_check()
 	_test_piece_faceted_meshes()
 	_test_ai_player_move_selection()
 	_test_software_renderer_detection()
@@ -219,6 +220,89 @@ func _test_search_push_pop_consistency() -> void:
 	_assert(piece.grid_pos == mv.to, "push_search_move moves piece in-place")
 	rules.pop_search_move(undo)
 	_assert(piece.grid_pos == orig_pos and rules.pieces.size() == orig_count, "pop_search_move restores exact board state")
+
+
+func _verify_spatial_index_invariants(rules: GameRules) -> bool:
+	for cell in GameRules.get_all_board_cells():
+		var expected: PieceData = null
+		for p in rules.pieces:
+			if p.grid_pos == cell:
+				expected = p
+				break
+		if rules.get_piece_at(cell) != expected:
+			return false
+	for p in rules.pieces:
+		if rules.get_piece_by_id(p.id) != p:
+			return false
+	return true
+
+
+func _test_spatial_index_and_reverse_attack_check() -> void:
+	print("\n-- O(1) Spatial Index & Allocation-Free Reverse-Attack Check --")
+	var rules := GameRules.new()
+	_assert(_verify_spatial_index_invariants(rules), "Initial 36-piece board spatial grid and ID map match linear scan")
+
+	# Play a sequence of moves including captures and verify index invariants after push/pop and execute/undo
+	for pair in [["f5", "f7"], ["e7", "f6"], ["e4", "f6"], ["g7", "f6"]]:
+		var from_c := GameRules.algebraic_to_axial(pair[0])
+		var to_c := GameRules.algebraic_to_axial(pair[1])
+		var p := rules.get_piece_at(from_c)
+		var chosen: GameRules.VectorMove = null
+		if p != null:
+			for mv in rules.get_legal_moves_for_piece(p):
+				if mv.to == to_c:
+					chosen = mv
+					break
+		if chosen != null:
+			var undo := rules.push_search_move(chosen)
+			var ok_push := _verify_spatial_index_invariants(rules)
+			rules.pop_search_move(undo)
+			var ok_pop := _verify_spatial_index_invariants(rules)
+			rules.execute_move(chosen)
+			var ok_exec := _verify_spatial_index_invariants(rules)
+			if not (ok_push and ok_pop and ok_exec):
+				_assert(false, "Spatial index desynchronized during move %s->%s" % [pair[0], pair[1]])
+				return
+	_assert(true, "Spatial grid and ID map stay synchronized across push_search_move, pop_search_move, and execute_move captures")
+
+	while rules.undo_last_move():
+		if not _verify_spatial_index_invariants(rules):
+			_assert(false, "Spatial index desynchronized after undo_last_move()")
+			return
+	_assert(rules.pieces.size() == 36, "Spatial grid and ID map stay synchronized after full undo history rollback")
+
+	# Verify reverse-attack detection across all piece types and ray blockers
+	rules.pieces.clear()
+	var king_pos := Vector2i(0, 0)
+	rules._spawn_piece(PieceData.Team.CYAN, PieceData.Type.KING, king_pos)
+	rules._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.KING, Vector2i(0, -5))
+	_assert(not rules.is_king_in_check(PieceData.Team.CYAN), "Center King is not in check when enemy King is 5 hexes away")
+
+	# Knight attack at jump vector (2, -3)
+	var knight := rules._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.KNIGHT, Vector2i(2, -3))
+	_assert(rules.is_king_in_check(PieceData.Team.CYAN), "is_cell_attacked detects enemy Knight jump at (2, -3)")
+	rules.pieces.erase(knight)
+
+	# Diagonal Bishop attack at (2, -4) = 2 * (1, -2) and blocker at (1, -2)
+	var bishop := rules._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.BISHOP, Vector2i(2, -4))
+	_assert(rules.is_king_in_check(PieceData.Team.CYAN), "is_cell_attacked detects unobstructed diagonal Bishop ray")
+	var diag_blocker := rules._spawn_piece(PieceData.Team.CYAN, PieceData.Type.PAWN, Vector2i(1, -2))
+	_assert(not rules.is_king_in_check(PieceData.Team.CYAN), "Intermediate piece on diagonal ray blocks Bishop check")
+	rules.pieces.erase(diag_blocker)
+	rules.pieces.erase(bishop)
+
+	# Orthogonal Rook attack at (-3, 0) and blocker at (-1, 0)
+	var rook := rules._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.ROOK, Vector2i(-3, 0))
+	_assert(rules.is_king_in_check(PieceData.Team.CYAN), "is_cell_attacked detects unobstructed orthogonal Rook ray")
+	var ortho_blocker := rules._spawn_piece(PieceData.Team.CYAN, PieceData.Type.PAWN, Vector2i(-1, 0))
+	_assert(not rules.is_king_in_check(PieceData.Team.CYAN), "Intermediate piece on orthogonal ray blocks Rook check")
+	rules.pieces.erase(ortho_blocker)
+	rules.pieces.erase(rook)
+
+	# Magenta Pawn capture attack from (1, -1) -> attacks (0, 0) via MAGENTA_PAWN_CAP_DIRS (-1, 1)
+	var mpawn := rules._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.PAWN, Vector2i(1, -1))
+	_assert(rules.is_king_in_check(PieceData.Team.CYAN), "is_cell_attacked detects enemy Magenta Pawn capture vector")
+	rules.pieces.erase(mpawn)
 
 
 func _test_piece_faceted_meshes() -> void:
