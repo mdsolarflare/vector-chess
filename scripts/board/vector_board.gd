@@ -261,7 +261,7 @@ func _process(delta: float) -> void:
 func start_new_game() -> void:
 	rules.reset_game()
 	selected_piece = null
-	legal_moves.clear()
+	legal_moves = []
 	hovered_move = null
 	pending_promotion_move = null
 	input_locked = false
@@ -275,7 +275,7 @@ func undo_move() -> bool:
 	pending_promotion_move = null
 	if rules.undo_last_move():
 		selected_piece = null
-		legal_moves.clear()
+		legal_moves = []
 		hovered_move = null
 		_rebuild_board_cache()
 		selection_changed.emit(null, null)
@@ -346,7 +346,7 @@ func _handle_cell_interaction(cell: Vector2i) -> void:
 		selected_piece = clicked_piece
 		if _cached_turn_moves.has(selected_piece.id):
 			var cached: Array[GameRules.VectorMove] = _cached_turn_moves[selected_piece.id]
-			legal_moves = cached
+			legal_moves = cached.duplicate()
 		else:
 			legal_moves = rules.get_legal_moves_for_piece(selected_piece)
 		_update_hovered_move()
@@ -367,7 +367,7 @@ func _commit_move(move: GameRules.VectorMove) -> void:
 	if rules.execute_move(move):
 		var notation: String = str(rules.move_history[-1].get("notation", ""))
 		selected_piece = null
-		legal_moves.clear()
+		legal_moves = []
 		hovered_move = null
 		_rebuild_board_cache()
 		selection_changed.emit(null, null)
@@ -377,7 +377,7 @@ func _commit_move(move: GameRules.VectorMove) -> void:
 
 func _clear_selection() -> void:
 	selected_piece = null
-	legal_moves.clear()
+	legal_moves = []
 	hovered_move = null
 	selection_changed.emit(null, null)
 	queue_redraw()

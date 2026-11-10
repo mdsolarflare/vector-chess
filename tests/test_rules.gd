@@ -450,9 +450,10 @@ func _test_vector_board_caching_and_idle_redraw() -> void:
 	# Select a piece via cell interaction and verify cached moves are used and pulse activates
 	var cyan_pawn_cell := GameRules.algebraic_to_axial("f5")
 	board._handle_cell_interaction(cyan_pawn_cell)
+	var initial_f5_move_count := board.legal_moves.size()
 	_assert(
-		board.selected_piece != null and not board.legal_moves.is_empty(),
-		"Selecting a piece populates legal_moves from cache"
+		board.selected_piece != null and initial_f5_move_count == 1,
+		"Selecting f5 pawn populates 1 legal_move from cache"
 	)
 	_assert(
 		board.is_animating(),
@@ -463,6 +464,32 @@ func _test_vector_board_caching_and_idle_redraw() -> void:
 		board._pulse_time > pulse_before,
 		"VectorBoard._process advances pulse and redraws while a piece is selected"
 	)
+
+	# Regression test for Issues #18 & #22:
+	# Deselecting a piece by clicking an empty hex or rotating across pieces must NOT wipe _cached_turn_moves.
+	var non_target_empty_cell := GameRules.algebraic_to_axial("a4")
+	board._handle_cell_interaction(non_target_empty_cell)
+	_assert(
+		board.selected_piece == null and board.legal_moves.is_empty(),
+		"Clicking an empty non-target hex clears the active selection"
+	)
+	board._handle_cell_interaction(cyan_pawn_cell)
+	_assert(
+		board.selected_piece != null and board.legal_moves.size() == initial_f5_move_count,
+		"Re-selecting f5 pawn after backing out to the board preserves all %d legal moves (Issues #18/#22 regression)" % initial_f5_move_count
+	)
+
+	# Rotate selection across multiple pieces, back out to out-of-bounds hex, and re-verify
+	var cyan_knight_cell := GameRules.algebraic_to_axial("d1")
+	board._handle_cell_interaction(cyan_knight_cell)
+	var knight_move_count := board.legal_moves.size()
+	board._handle_cell_interaction(GameRules.INVALID_HEX)
+	board._handle_cell_interaction(cyan_knight_cell)
+	_assert(
+		board.selected_piece != null and board.legal_moves.size() == knight_move_count and knight_move_count > 0,
+		"Re-selecting d1 Knight after out-of-bounds deselection preserves all %d legal moves" % knight_move_count
+	)
+	board._handle_cell_interaction(cyan_pawn_cell)
 
 	# Execute a move and verify cache updates to Magenta's turn and piece interpolation animates
 	var first_mv: GameRules.VectorMove = board.legal_moves[0]
