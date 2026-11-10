@@ -154,6 +154,16 @@ func _init_pawn_start_tables() -> void:
 		_magenta_pawn_starts.append(algebraic_to_axial(alg))
 
 
+func _ensure_spatial_index() -> void:
+	if _indexed_piece_count != pieces.size():
+		_rebuild_spatial_index()
+		return
+	if not pieces.is_empty():
+		var first := pieces[0]
+		if first.id <= 0 or first.id >= _id_map.size() or _id_map[first.id] != first:
+			_rebuild_spatial_index()
+
+
 func _rebuild_spatial_index() -> void:
 	_grid.fill(null)
 	_id_map.fill(null)
@@ -223,8 +233,7 @@ func reset_game() -> void:
 
 
 func _spawn_piece(team: PieceData.Team, type: PieceData.Type, pos: Vector2i) -> PieceData:
-	if _indexed_piece_count != pieces.size():
-		_rebuild_spatial_index()
+	_ensure_spatial_index()
 	var p := PieceData.new(_next_id, team, type, pos)
 	_next_id += 1
 	pieces.append(p)
@@ -264,8 +273,7 @@ func get_all_legal_moves(team: PieceData.Team, _build_rays: bool = true) -> Arra
 	var all_moves: Array[VectorMove] = []
 	if is_game_over:
 		return all_moves
-	if _indexed_piece_count != pieces.size():
-		_rebuild_spatial_index()
+	_ensure_spatial_index()
 	for p in pieces:
 		if p.team == team:
 			var pseudo_moves := _get_pseudo_legal_moves(p)
@@ -281,8 +289,7 @@ func get_all_tactical_moves(team: PieceData.Team) -> Array[VectorMove]:
 	var tactical_moves: Array[VectorMove] = []
 	if is_game_over:
 		return tactical_moves
-	if _indexed_piece_count != pieces.size():
-		_rebuild_spatial_index()
+	_ensure_spatial_index()
 	for p in pieces:
 		if p.team == team:
 			var pseudo := _get_pseudo_tactical_moves(p)
@@ -294,8 +301,7 @@ func get_all_tactical_moves(team: PieceData.Team) -> Array[VectorMove]:
 
 ## Fast in-place move execution for AI search tree traversal (no string formatting or full array cloning).
 func push_search_move(move: VectorMove) -> Dictionary:
-	if _indexed_piece_count != pieces.size():
-		_rebuild_spatial_index()
+	_ensure_spatial_index()
 	var piece := get_piece_by_id(move.piece_id)
 	var target: PieceData = null
 	if move.is_en_passant:
@@ -449,14 +455,12 @@ static func is_promotion_cell(team: PieceData.Team, pos: Vector2i) -> bool:
 func get_piece_at(pos: Vector2i) -> PieceData:
 	if not is_inside_board(pos):
 		return null
-	if _indexed_piece_count != pieces.size():
-		_rebuild_spatial_index()
+	_ensure_spatial_index()
 	return _grid[(pos.x + BOARD_RADIUS) * GRID_SPAN + (pos.y + BOARD_RADIUS)]
 
 
 func get_piece_by_id(id: int) -> PieceData:
-	if _indexed_piece_count != pieces.size():
-		_rebuild_spatial_index()
+	_ensure_spatial_index()
 	if id <= 0 or id >= _id_map.size():
 		return null
 	return _id_map[id]
@@ -466,8 +470,7 @@ func get_piece_by_id(id: int) -> PieceData:
 func get_legal_moves_for_piece(piece: PieceData) -> Array[VectorMove]:
 	if piece == null or is_game_over:
 		return []
-	if _indexed_piece_count != pieces.size():
-		_rebuild_spatial_index()
+	_ensure_spatial_index()
 	var pseudo_moves := _get_pseudo_legal_moves(piece)
 	var legal_moves: Array[VectorMove] = []
 	for mv in pseudo_moves:
@@ -478,8 +481,7 @@ func get_legal_moves_for_piece(piece: PieceData) -> Array[VectorMove]:
 
 ## Executes a validated move and advances the turn.
 func execute_move(move: VectorMove) -> bool:
-	if _indexed_piece_count != pieces.size():
-		_rebuild_spatial_index()
+	_ensure_spatial_index()
 	var piece := get_piece_by_id(move.piece_id)
 	if piece == null:
 		return false
@@ -568,9 +570,11 @@ func undo_last_move() -> bool:
 
 ## Allocation-free reverse-attack lookup from `target_pos` for pieces belonging to `by_team`.
 func is_cell_attacked(target_pos: Vector2i, by_team: PieceData.Team) -> bool:
-	if _indexed_piece_count != pieces.size():
-		_rebuild_spatial_index()
+	_ensure_spatial_index()
+	return _is_cell_attacked_raw(target_pos, by_team)
 
+
+func _is_cell_attacked_raw(target_pos: Vector2i, by_team: PieceData.Team) -> bool:
 	# 1. Orthogonal rays: Rook, Queen, or adjacent King
 	for d in ORTHO_DIRS:
 		var step_pos := target_pos + d
@@ -648,13 +652,12 @@ func is_cell_attacked(target_pos: Vector2i, by_team: PieceData.Team) -> bool:
 
 
 func is_king_in_check(team: PieceData.Team) -> bool:
-	if _indexed_piece_count != pieces.size():
-		_rebuild_spatial_index()
+	_ensure_spatial_index()
 	var king := _cyan_king if team == PieceData.Team.CYAN else _magenta_king
 	if king == null:
 		return true
 	var enemy_team := PieceData.Team.MAGENTA if team == PieceData.Team.CYAN else PieceData.Team.CYAN
-	return is_cell_attacked(king.grid_pos, enemy_team)
+	return _is_cell_attacked_raw(king.grid_pos, enemy_team)
 
 
 func format_move_notation(piece: PieceData, move: VectorMove) -> String:
@@ -888,7 +891,7 @@ func _move_leaves_king_in_check(piece: PieceData, move: VectorMove) -> bool:
 		_grid[to_idx] = piece
 		piece.grid_pos = move.to
 
-		var in_check_ep := is_cell_attacked(king.grid_pos, enemy_team)
+		var in_check_ep := _is_cell_attacked_raw(king.grid_pos, enemy_team)
 
 		piece.grid_pos = old_pos
 		_grid[to_idx] = null
@@ -901,7 +904,7 @@ func _move_leaves_king_in_check(piece: PieceData, move: VectorMove) -> bool:
 	_grid[to_idx] = piece
 	piece.grid_pos = move.to
 
-	var in_check := is_cell_attacked(king.grid_pos, enemy_team)
+	var in_check := _is_cell_attacked_raw(king.grid_pos, enemy_team)
 
 	piece.grid_pos = old_pos
 	_grid[to_idx] = captured
