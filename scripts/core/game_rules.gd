@@ -651,6 +651,89 @@ func _is_cell_attacked_raw(target_pos: Vector2i, by_team: PieceData.Team) -> boo
 	return false
 
 
+## Returns all pieces belonging to `by_team` that currently attack `target_pos`.
+func get_cell_attackers(target_pos: Vector2i, by_team: PieceData.Team) -> Array[PieceData]:
+	_ensure_spatial_index()
+	var attackers: Array[PieceData] = []
+	if not is_inside_board(target_pos):
+		return attackers
+
+	# 1. Orthogonal rays: Rook, Queen, or adjacent King
+	for d in ORTHO_DIRS:
+		var step_pos := target_pos + d
+		var is_first_step := true
+		while (
+			absi(step_pos.x) <= BOARD_RADIUS
+			and absi(step_pos.y) <= BOARD_RADIUS
+			and absi(step_pos.x + step_pos.y) <= BOARD_RADIUS
+		):
+			var occ := _grid[(step_pos.x + BOARD_RADIUS) * GRID_SPAN + (step_pos.y + BOARD_RADIUS)]
+			if occ != null:
+				if occ.team == by_team:
+					var t := occ.type
+					if (
+						t == PieceData.Type.ROOK
+						or t == PieceData.Type.QUEEN
+						or (is_first_step and t == PieceData.Type.KING)
+					):
+						attackers.append(occ)
+				break
+			step_pos += d
+			is_first_step = false
+
+	# 2. Diagonal rays: Bishop, Queen, or adjacent King
+	for d in DIAG_DIRS:
+		var step_pos := target_pos + d
+		var is_first_step := true
+		while (
+			absi(step_pos.x) <= BOARD_RADIUS
+			and absi(step_pos.y) <= BOARD_RADIUS
+			and absi(step_pos.x + step_pos.y) <= BOARD_RADIUS
+		):
+			var occ := _grid[(step_pos.x + BOARD_RADIUS) * GRID_SPAN + (step_pos.y + BOARD_RADIUS)]
+			if occ != null:
+				if occ.team == by_team:
+					var t := occ.type
+					if (
+						t == PieceData.Type.BISHOP
+						or t == PieceData.Type.QUEEN
+						or (is_first_step and t == PieceData.Type.KING)
+					):
+						attackers.append(occ)
+				break
+			step_pos += d
+			is_first_step = false
+
+	# 3. Knight jumps (12 offsets)
+	for j in KNIGHT_DIRS:
+		var k_pos := target_pos + j
+		if (
+			absi(k_pos.x) <= BOARD_RADIUS
+			and absi(k_pos.y) <= BOARD_RADIUS
+			and absi(k_pos.x + k_pos.y) <= BOARD_RADIUS
+		):
+			var occ := _grid[(k_pos.x + BOARD_RADIUS) * GRID_SPAN + (k_pos.y + BOARD_RADIUS)]
+			if occ != null and occ.team == by_team and occ.type == PieceData.Type.KNIGHT:
+				attackers.append(occ)
+
+	# 4. Pawn captures (reverse of by_team's pawn capture vectors)
+	var cap_dirs: Array[Vector2i] = (
+		CYAN_PAWN_CAP_DIRS if by_team == PieceData.Team.CYAN else MAGENTA_PAWN_CAP_DIRS
+	)
+	for cd in cap_dirs:
+		var p_pos := target_pos - cd
+		if (
+			absi(p_pos.x) <= BOARD_RADIUS
+			and absi(p_pos.y) <= BOARD_RADIUS
+			and absi(p_pos.x + p_pos.y) <= BOARD_RADIUS
+		):
+			var occ := _grid[(p_pos.x + BOARD_RADIUS) * GRID_SPAN + (p_pos.y + BOARD_RADIUS)]
+			if occ != null and occ.team == by_team and occ.type == PieceData.Type.PAWN:
+				attackers.append(occ)
+
+	return attackers
+
+
 func is_king_in_check(team: PieceData.Team) -> bool:
 	_ensure_spatial_index()
 	var king := _cyan_king if team == PieceData.Team.CYAN else _magenta_king
@@ -658,6 +741,16 @@ func is_king_in_check(team: PieceData.Team) -> bool:
 		return true
 	var enemy_team := PieceData.Team.MAGENTA if team == PieceData.Team.CYAN else PieceData.Team.CYAN
 	return _is_cell_attacked_raw(king.grid_pos, enemy_team)
+
+
+## Returns all enemy pieces currently placing `team`'s King in check.
+func get_checking_pieces(team: PieceData.Team) -> Array[PieceData]:
+	_ensure_spatial_index()
+	var king := _cyan_king if team == PieceData.Team.CYAN else _magenta_king
+	if king == null:
+		return []
+	var enemy_team := PieceData.Team.MAGENTA if team == PieceData.Team.CYAN else PieceData.Team.CYAN
+	return get_cell_attackers(king.grid_pos, enemy_team)
 
 
 func format_move_notation(piece: PieceData, move: VectorMove) -> String:

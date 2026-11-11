@@ -20,6 +20,7 @@ const COLOR_MAGENTA := Color(1.0, 0.16, 0.52, 1.0)
 const COLOR_VECTOR_RAY := Color(0.25, 1.0, 0.65, 0.85)
 const COLOR_CAPTURE_RAY := Color(1.0, 0.32, 0.25, 0.95)
 const COLOR_LAST_MOVE := Color(1.0, 0.82, 0.2, 0.70)
+const COLOR_CHECK_VECTOR := Color(1.0, 0.55, 0.0, 0.95)
 
 const ATLAS_CELL_SIZE: int = 128
 const ATLAS_COLS: int = 6
@@ -58,6 +59,7 @@ var _all_cells: Array[Vector2i] = []
 var _cell_meta: Array[Dictionary] = []
 var _cached_turn_moves: Dictionary = {}
 var _cached_check_kings: Array[PieceData] = []
+var _cached_check_vectors: Array[Dictionary] = []
 var _bg_viewport: SubViewport = null
 var _bg_layer: Control = null
 var _piece_atlas_viewport: SubViewport = null
@@ -209,6 +211,7 @@ func set_line_antialiasing(enabled: bool) -> void:
 func _rebuild_board_cache() -> void:
 	_cached_turn_moves.clear()
 	_cached_check_kings.clear()
+	_cached_check_vectors.clear()
 
 	if not rules.is_game_over:
 		for p in rules.pieces:
@@ -217,9 +220,15 @@ func _rebuild_board_cache() -> void:
 
 	for team in [PieceData.Team.CYAN, PieceData.Team.MAGENTA]:
 		if rules.is_king_in_check(team):
+			var checking_pieces := rules.get_checking_pieces(team)
 			for p in rules.pieces:
 				if p.team == team and p.type == PieceData.Type.KING:
 					_cached_check_kings.append(p)
+					for attacker in checking_pieces:
+						_cached_check_vectors.append({
+							"attacker": attacker,
+							"king": p,
+						})
 
 
 func is_animating() -> bool:
@@ -488,7 +497,7 @@ func _draw() -> void:
 		var h_center := _axial_to_screen(Vector2(hovered_cell))
 		_draw_hex_highlight(h_center, Color(1, 1, 1, 0.04), Color(1, 1, 1, 0.35), 1.6)
 
-	# 7. Highlight King in check
+	# 7. Highlight King in check & caution orange check vectors
 	for king_piece in _cached_check_kings:
 		var k_center := _axial_to_screen(Vector2(king_piece.grid_pos))
 		var pulse := 0.5 + 0.5 * sin(_pulse_time * 8.0)
@@ -498,6 +507,14 @@ func _draw() -> void:
 			Color(1.0, 0.2, 0.2, 0.95),
 			3.0
 		)
+
+	if show_vectors:
+		for cv in _cached_check_vectors:
+			var attacker: PieceData = cv["attacker"]
+			var king_piece: PieceData = cv["king"]
+			var from_c := _axial_to_screen(attacker.visual_pos)
+			var to_c := _axial_to_screen(king_piece.visual_pos)
+			_draw_vector_arrow(from_c, to_c, COLOR_CHECK_VECTOR, 2.4, false, 0.86)
 
 	# 8. Draw all pieces using batched shared atlas quads
 	for p in rules.pieces:
@@ -551,7 +568,14 @@ static func draw_faceted_piece_icon(
 	canvas.draw_mesh(mesh, null, xform)
 
 
-func _draw_vector_arrow(from_pt: Vector2, to_pt: Vector2, color: Color, width: float, draw_label: bool) -> void:
+func _draw_vector_arrow(
+	from_pt: Vector2,
+	to_pt: Vector2,
+	color: Color,
+	width: float,
+	draw_label: bool,
+	end_inset_ratio: float = 0.25
+) -> void:
 	var diff := to_pt - from_pt
 	var dist := diff.length()
 	if dist < 4.0:
@@ -560,11 +584,13 @@ func _draw_vector_arrow(from_pt: Vector2, to_pt: Vector2, color: Color, width: f
 	var normal := Vector2(-dir.y, dir.x)
 
 	var start_pt := from_pt + dir * (_hex_radius * 0.32)
-	var tip_pt := to_pt - dir * (_hex_radius * 0.25)
-	draw_line(start_pt, tip_pt, color, width, line_aa_enabled)
-
+	var tip_pt := to_pt - dir * (_hex_radius * end_inset_ratio)
 	var head_len := clampf(_hex_radius * 0.34, 7.0, 14.0)
 	var head_width := head_len * 0.55
+	var shaft_end := tip_pt - dir * (head_len * 0.5)
+	if (shaft_end - start_pt).dot(dir) > 0.0:
+		draw_line(start_pt, shaft_end, color, width, line_aa_enabled)
+
 	var arrow_head := PackedVector2Array([
 		tip_pt,
 		tip_pt - dir * head_len + normal * head_width,
