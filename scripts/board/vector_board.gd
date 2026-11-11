@@ -514,7 +514,7 @@ func _draw() -> void:
 			var king_piece: PieceData = cv["king"]
 			var from_c := _axial_to_screen(attacker.visual_pos)
 			var to_c := _axial_to_screen(king_piece.visual_pos)
-			_draw_vector_arrow(from_c, to_c, COLOR_CHECK_VECTOR, 2.4, false)
+			_draw_vector_arrow(from_c, to_c, COLOR_CHECK_VECTOR, 2.4, false, 0.86)
 
 	# 8. Draw all pieces using batched shared atlas quads
 	for p in rules.pieces:
@@ -568,7 +568,14 @@ static func draw_faceted_piece_icon(
 	canvas.draw_mesh(mesh, null, xform)
 
 
-func _draw_vector_arrow(from_pt: Vector2, to_pt: Vector2, color: Color, width: float, draw_label: bool) -> void:
+func _draw_vector_arrow(
+	from_pt: Vector2,
+	to_pt: Vector2,
+	color: Color,
+	width: float,
+	draw_label: bool,
+	end_inset_ratio: float = 0.25
+) -> void:
 	var diff := to_pt - from_pt
 	var dist := diff.length()
 	if dist < 4.0:
@@ -577,11 +584,13 @@ func _draw_vector_arrow(from_pt: Vector2, to_pt: Vector2, color: Color, width: f
 	var normal := Vector2(-dir.y, dir.x)
 
 	var start_pt := from_pt + dir * (_hex_radius * 0.32)
-	var tip_pt := to_pt - dir * (_hex_radius * 0.25)
-	draw_line(start_pt, tip_pt, color, width, line_aa_enabled)
-
+	var tip_pt := to_pt - dir * (_hex_radius * end_inset_ratio)
 	var head_len := clampf(_hex_radius * 0.34, 7.0, 14.0)
 	var head_width := head_len * 0.55
+	var shaft_end := tip_pt - dir * (head_len * 0.5)
+	if (shaft_end - start_pt).dot(dir) > 0.0:
+		draw_line(start_pt, shaft_end, color, width, line_aa_enabled)
+
 	var arrow_head := PackedVector2Array([
 		tip_pt,
 		tip_pt - dir * head_len + normal * head_width,
