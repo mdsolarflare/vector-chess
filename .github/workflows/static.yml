@@ -1,22 +1,15 @@
-# Workflow for building Vector Chess (Godot 4 Web/WASM) and deploying to GitHub Pages
-name: Deploy Godot Web Build to Pages
+name: Deploy to GitHub Pages
 
 on:
-  # Runs on pushes targeting the default branch
   push:
-    branches: ["main"]
-
-  # Allows you to run this workflow manually from the Actions tab
+    branches: [ main, master ]
   workflow_dispatch:
 
-# Sets permissions of the GITHUB_TOKEN to allow deployment to GitHub Pages
 permissions:
   contents: read
   pages: write
   id-token: write
 
-# Allow only one concurrent deployment, skipping runs queued between the run in-progress and latest queued.
-# However, do NOT cancel in-progress runs as we want to allow these production deployments to complete.
 concurrency:
   group: "pages"
   cancel-in-progress: false
@@ -28,45 +21,47 @@ env:
   BUILD_PATH: "build/web"
 
 jobs:
-  deploy:
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+  build-and-deploy:
+    name: Build & Deploy Web Client
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Pages
-        uses: actions/configure-pages@v5
-
-      - name: Cache Godot binary and export templates
-        id: cache-godot
+      - name: Setup Godot binary cache
+        id: godot-cache
         uses: actions/cache@v4
         with:
-          path: |
-            ~/.cache/godot
-            ~/.local/share/godot/export_templates/${{ env.GODOT_VERSION }}.${{ env.RELEASE_TYPE }}
-          key: godot-${{ runner.os }}-${{ env.GODOT_VERSION }}-${{ env.RELEASE_TYPE }}
+          path: ~/.cache/godot
+          key: godot-${{ env.GODOT_VERSION }}-${{ env.RELEASE_TYPE }}-linux-x86_64
 
-      - name: Download and install Godot & Web export templates
-        if: steps.cache-godot.outputs.cache-hit != 'true'
+      - name: Setup Export Templates cache
+        id: templates-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/share/godot/export_templates
+          key: godot-templates-${{ env.GODOT_VERSION }}-${{ env.RELEASE_TYPE }}
+
+      - name: Download & install Godot binary
+        if: steps.godot-cache.outputs.cache-hit != 'true'
+        env:
+          GODOT_BASE_URL: "https://github.com/godotengine/godot/releases/download/${{ env.GODOT_VERSION }}-${{ env.RELEASE_TYPE }}"
+          GODOT_ZIP: "Godot_v${{ env.GODOT_VERSION }}-${{ env.RELEASE_TYPE }}_linux.x86_64.zip"
         run: |
           mkdir -p ~/.cache/godot
-          mkdir -p ~/.local/share/godot/export_templates/${GODOT_VERSION}.${RELEASE_TYPE}
-
-          GODOT_BASE_URL="https://github.com/godotengine/godot-builds/releases/download/${GODOT_VERSION}-${RELEASE_TYPE}"
-          EDITOR_ZIP="Godot_v${GODOT_VERSION}-${RELEASE_TYPE}_linux.x86_64.zip"
-          TEMPLATES_TPZ="Godot_v${GODOT_VERSION}-${RELEASE_TYPE}_export_templates.tpz"
-
-          echo "Downloading Godot ${GODOT_VERSION}-${RELEASE_TYPE} Linux binary..."
-          curl -fsSL "${GODOT_BASE_URL}/${EDITOR_ZIP}" -o "/tmp/${EDITOR_ZIP}"
-          unzip -q "/tmp/${EDITOR_ZIP}" -d ~/.cache/godot
-          mv ~/.cache/godot/Godot_v${GODOT_VERSION}-${RELEASE_TYPE}_linux.x86_64 ~/.cache/godot/godot
+          curl -fsSL "${GODOT_BASE_URL}/${GODOT_ZIP}" -o "/tmp/${GODOT_ZIP}"
+          unzip -q "/tmp/${GODOT_ZIP}" -d ~/.cache/godot
+          mv ~/.cache/godot/Godot_v${{ env.GODOT_VERSION }}-${{ env.RELEASE_TYPE }}_linux.x86_64 ~/.cache/godot/godot
           chmod +x ~/.cache/godot/godot
-          rm -f "/tmp/${EDITOR_ZIP}"
+          rm -f "/tmp/${GODOT_ZIP}"
 
-          echo "Downloading Godot ${GODOT_VERSION}-${RELEASE_TYPE} export templates..."
+      - name: Download & install Export Templates
+        if: steps.templates-cache.outputs.cache-hit != 'true'
+        env:
+          GODOT_BASE_URL: "https://github.com/godotengine/godot/releases/download/${{ env.GODOT_VERSION }}-${{ env.RELEASE_TYPE }}"
+          TEMPLATES_TPZ: "Godot_v${{ env.GODOT_VERSION }}-${{ env.RELEASE_TYPE }}_export_templates.tpz"
+        run: |
+          mkdir -p ~/.local/share/godot/export_templates/${GODOT_VERSION}.${RELEASE_TYPE}
           curl -fsSL "${GODOT_BASE_URL}/${TEMPLATES_TPZ}" -o "/tmp/${TEMPLATES_TPZ}"
           unzip -q "/tmp/${TEMPLATES_TPZ}" -d /tmp/godot_templates
           mv /tmp/godot_templates/templates/* ~/.local/share/godot/export_templates/${GODOT_VERSION}.${RELEASE_TYPE}/
@@ -78,6 +73,7 @@ jobs:
           $HOME/.cache/godot/godot --version
 
       - name: Import project and export Web (WASM) build
+        shell: bash
         run: |
           mkdir -p "${BUILD_PATH}"
           # Bootstrap .godot/ import cache and global_script_class_cache.cfg
@@ -85,9 +81,9 @@ jobs:
           # Export release Web build (index.html, index.wasm, index.pck, index.js)
           godot --headless --export-release "${EXPORT_PRESET}" "${BUILD_PATH}/index.html"
           # Stamp exported Web assets with short commit SHA to prevent stale browser caching
-          CACHE_BUST="${GITHUB_SHA::7}"
-          sed -i "s/index\.js/index.js?v=${CACHE_BUST}/g; s/index\.png/index.png?v=${CACHE_BUST}/g; s/index\.icon\.png/index.icon.png?v=${CACHE_BUST}/g; s/index\.apple-touch-icon\.png/index.apple-touch-icon.png?v=${CACHE_BUST}/g" "${BUILD_PATH}/index.html"
-          sed -i "s/fetch(file)/fetch(file + '?v=${CACHE_BUST}')/g; s/\.audio\.worklet\.js/.audio.worklet.js?v=${CACHE_BUST}/g" "${BUILD_PATH}/index.js"
+          CACHE_BUST=$(echo "${GITHUB_SHA}" | cut -c1-7)
+          sed -i "s/index\\.js/index.js?v=${CACHE_BUST}/g; s/index\\.png/index.png?v=${CACHE_BUST}/g; s/index\\.icon\\.png/index.icon.png?v=${CACHE_BUST}/g; s/index\\.apple-touch-icon\\.png/index.apple-touch-icon.png?v=${CACHE_BUST}/g" "${BUILD_PATH}/index.html"
+          sed -i "s/fetch(file)/fetch(file + '?v=${CACHE_BUST}')/g; s/\\.audio\\.worklet\\.js/.audio.worklet.js?v=${CACHE_BUST}/g" "${BUILD_PATH}/index.js"
           grep -q "index.js?v=${CACHE_BUST}" "${BUILD_PATH}/index.html"
           grep -q "fetch(file + '?v=${CACHE_BUST}')" "${BUILD_PATH}/index.js"
           ls -lh "${BUILD_PATH}"
