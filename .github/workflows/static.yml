@@ -84,6 +84,12 @@ jobs:
           godot --headless --import
           # Export release Web build (index.html, index.wasm, index.pck, index.js)
           godot --headless --export-release "${EXPORT_PRESET}" "${BUILD_PATH}/index.html"
+          # Stamp exported Web assets with short commit SHA to prevent stale browser caching
+          CACHE_BUST="${GITHUB_SHA::7}"
+          sed -i "s/index\.js/index.js?v=${CACHE_BUST}/g; s/index\.png/index.png?v=${CACHE_BUST}/g; s/index\.icon\.png/index.icon.png?v=${CACHE_BUST}/g; s/index\.apple-touch-icon\.png/index.apple-touch-icon.png?v=${CACHE_BUST}/g" "${BUILD_PATH}/index.html"
+          sed -i "s/fetch(file)/fetch(file + '?v=${CACHE_BUST}')/g; s/\.audio\.worklet\.js/.audio.worklet.js?v=${CACHE_BUST}/g" "${BUILD_PATH}/index.js"
+          grep -q "index.js?v=${CACHE_BUST}" "${BUILD_PATH}/index.html"
+          grep -q "fetch(file + '?v=${CACHE_BUST}')" "${BUILD_PATH}/index.js"
           ls -lh "${BUILD_PATH}"
           test -f "${BUILD_PATH}/index.html"
           test -f "${BUILD_PATH}/index.wasm"
