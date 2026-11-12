@@ -66,9 +66,15 @@ jobs:
           test -f "build/macos/${EXPORT_NAME}.zip"
 
       - name: Export Web (HTML5 / WebAssembly)
+        shell: bash
         run: |
           mkdir -p build/web
           godot --headless --export-release "Web" "build/web/index.html"
+          CACHE_BUST=$(echo "${GITHUB_SHA}" | cut -c1-7)
+          sed -i "s/index\\.js/index.js?v=${CACHE_BUST}/g; s/index\\.png/index.png?v=${CACHE_BUST}/g; s/index\\.icon\\.png/index.icon.png?v=${CACHE_BUST}/g; s/index\\.apple-touch-icon\\.png/index.apple-touch-icon.png?v=${CACHE_BUST}/g" "build/web/index.html"
+          sed -i "s/fetch(file)/fetch(file + '?v=${CACHE_BUST}')/g; s/\\.audio\\.worklet\\.js/.audio.worklet.js?v=${CACHE_BUST}/g" "build/web/index.js"
+          grep -q "index.js?v=${CACHE_BUST}" "build/web/index.html"
+          grep -q "fetch(file + '?v=${CACHE_BUST}')" "build/web/index.js"
           test -f "build/web/index.html"
 
       - name: Upload Build Artifacts
