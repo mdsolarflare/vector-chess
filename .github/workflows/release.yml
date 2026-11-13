@@ -1,21 +1,25 @@
 name: Store Release Pipeline
 
 on:
-  push:
-    tags:
-      - "v*.*.*"
   workflow_dispatch:
     inputs:
       release_version:
-        description: "Version string (e.g. 0.2.0) when triggered manually"
-        required: false
+        description: "Release version (e.g. 0.2.0 — without leading 'v')"
+        required: true
+        type: string
         default: "0.1.0"
       steam_branch:
         description: "Steam branch to set live (e.g. beta, default, or empty for none)"
         required: false
+        type: string
         default: "beta"
       upload_to_stores:
         description: "Upload directly to Steam / Google Play / App Store Connect (if secrets exist)"
+        required: false
+        type: boolean
+        default: true
+      create_github_release:
+        description: "Create git tag v<release_version> and publish GitHub Release"
         required: false
         type: boolean
         default: true
@@ -57,14 +61,12 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Resolve Version
+      - name: Stamp Release Version
         id: version
+        env:
+          RAW_VERSION: ${{ inputs.release_version }}
         run: |
-          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-            VER="${GITHUB_REF#refs/tags/v}"
-          else
-            VER="${{ inputs.release_version || '0.1.0' }}"
-          fi
+          VER="${RAW_VERSION#v}"
           echo "version=${VER}" >> "$GITHUB_OUTPUT"
           sed -i "s/config\/version=\".*\"/config\/version=\"${VER}\"/g" project.godot
 
@@ -124,6 +126,10 @@ jobs:
           godot --headless --export-release "Windows Desktop" "build/windows/${EXPORT_NAME}.exe"
           godot --headless --export-release "Linux" "build/linux/${EXPORT_NAME}.x86_64"
           chmod +x "build/linux/${EXPORT_NAME}.x86_64"
+          test -f "build/windows/${EXPORT_NAME}.exe"
+          test -f "build/windows/${EXPORT_NAME}.pck"
+          test -f "build/linux/${EXPORT_NAME}.x86_64"
+          test -f "build/linux/${EXPORT_NAME}.pck"
 
           # Create standalone release archives + tar Linux depot to preserve +x permissions
           (cd build/windows && zip -qr "../../dist/${EXPORT_NAME}-Windows-v${{ steps.version.outputs.version }}.zip" .)
@@ -131,10 +137,12 @@ jobs:
           tar -cf build/steam-linux.tar -C build linux
 
       - name: Configure Android SDK, Gradle Template & Keystore
+        id: android-config
         env:
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
           ANDROID_KEYSTORE_USER: ${{ secrets.ANDROID_KEYSTORE_USER }}
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          GOOGLE_PLAY_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}
         run: |
           # Populate Godot Android Gradle template from export templates
           TEMPLATE_DIR="$HOME/.local/share/godot/export_templates/${GODOT_VERSION}.${RELEASE_TYPE}"
@@ -170,6 +178,11 @@ jobs:
             echo "GODOT_ANDROID_KEYSTORE_RELEASE_USER=${ANDROID_KEYSTORE_USER}" >> "$GITHUB_ENV"
             echo "GODOT_ANDROID_KEYSTORE_RELEASE_PASSWORD=${ANDROID_KEYSTORE_PASSWORD}" >> "$GITHUB_ENV"
             echo '- Android `.aab`: Signed with **Production Upload Keystore**.' >> "$GITHUB_STEP_SUMMARY"
+            if [ -n "${GOOGLE_PLAY_SERVICE_ACCOUNT_JSON}" ]; then
+              echo "can_upload_play=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "can_upload_play=false" >> "$GITHUB_OUTPUT"
+            fi
           else
             keytool -genkeypair -v -keystore "$RUNNER_TEMP/ephemeral.keystore" \
               -storepass vectorchess -alias vectorchess -keypass vectorchess \
@@ -180,6 +193,7 @@ jobs:
             echo "GODOT_ANDROID_KEYSTORE_RELEASE_PASSWORD=vectorchess" >> "$GITHUB_ENV"
             echo "::warning::ANDROID_KEYSTORE_BASE64 secret not set; signing .aab with an ephemeral test keystore."
             echo '- Android `.aab`: Signed with **Ephemeral Test Keystore** (configure `ANDROID_KEYSTORE_BASE64` before Play Store upload).' >> "$GITHUB_STEP_SUMMARY"
+            echo "can_upload_play=false" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Export Android Play Store (.aab) & Sideload (.apk)
@@ -191,10 +205,7 @@ jobs:
           test -f "dist/${EXPORT_NAME}-v${{ steps.version.outputs.version }}.apk"
 
       - name: Upload to Google Play (Internal Track)
-        if: >-
-          (startsWith(github.ref, 'refs/tags/v') || inputs.upload_to_stores == true) &&
-          secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON != '' &&
-          secrets.ANDROID_KEYSTORE_BASE64 != ''
+        if: inputs.upload_to_stores == true && steps.android-config.outputs.can_upload_play == 'true'
         uses: r0adkll/upload-google-play@v1
         with:
           serviceAccountJsonPlainText: ${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}
@@ -236,14 +247,12 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Resolve Version
+      - name: Stamp Release Version
         id: version
+        env:
+          RAW_VERSION: ${{ inputs.release_version }}
         run: |
-          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-            VER="${GITHUB_REF#refs/tags/v}"
-          else
-            VER="${{ inputs.release_version || '0.1.0' }}"
-          fi
+          VER="${RAW_VERSION#v}"
           echo "version=${VER}" >> "$GITHUB_OUTPUT"
           sed -i '' "s/config\/version=\".*\"/config\/version=\"${VER}\"/g" project.godot
           sed -i '' "s/short_version=\".*\"/short_version=\"${VER}\"/g" export_presets.cfg
@@ -356,7 +365,7 @@ jobs:
           APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
           APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
           APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
-          UPLOAD_TO_STORES: ${{ startsWith(github.ref, 'refs/tags/v') || inputs.upload_to_stores == true }}
+          UPLOAD_TO_STORES: ${{ inputs.upload_to_stores == true }}
         run: |
           GODOT_BIN="$HOME/.cache/godot-macos/Godot.app/Contents/MacOS/Godot"
           mkdir -p build/ios dist
@@ -427,11 +436,7 @@ jobs:
   deploy-steam:
     name: Deploy to SteamPipe
     needs: [build-desktop-android, build-apple]
-    if: >-
-      (startsWith(github.ref, 'refs/tags/v') || inputs.upload_to_stores == true) &&
-      vars.STEAM_APP_ID != '' &&
-      secrets.STEAM_USERNAME != '' &&
-      secrets.STEAM_CONFIG_VDF != ''
+    if: inputs.upload_to_stores == true && vars.STEAM_APP_ID != ''
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Repository
@@ -461,13 +466,15 @@ jobs:
           DEPOT_WIN: ${{ vars.STEAM_DEPOT_WINDOWS }}
           DEPOT_LIN: ${{ vars.STEAM_DEPOT_LINUX }}
           DEPOT_MAC: ${{ vars.STEAM_DEPOT_MACOS }}
-          SET_LIVE: ${{ inputs.steam_branch || 'beta' }}
+          SET_LIVE: ${{ inputs.steam_branch }}
+          RAW_VERSION: ${{ inputs.release_version }}
         run: |
           mkdir -p build steam/output
           tar -xf /tmp/steam-linux/steam-linux.tar -C build
           tar -xf /tmp/steam-macos/steam-macos.tar -C build
 
-          DESC="Vector Chess ${GITHUB_REF_NAME} (${GITHUB_SHA::7})"
+          VER="${RAW_VERSION#v}"
+          DESC="Vector Chess v${VER} (${GITHUB_SHA::7})"
           sed -i "s/__STEAM_APP_ID__/${STEAM_APP_ID}/g" steam/*.vdf
           sed -i "s/__STEAM_DEPOT_WINDOWS__/${DEPOT_WIN}/g" steam/*.vdf
           sed -i "s/__STEAM_DEPOT_LINUX__/${DEPOT_LIN}/g" steam/*.vdf
@@ -480,6 +487,10 @@ jobs:
           STEAM_USERNAME: ${{ secrets.STEAM_USERNAME }}
           STEAM_CONFIG_VDF: ${{ secrets.STEAM_CONFIG_VDF }}
         run: |
+          if [ -z "${STEAM_USERNAME}" ] || [ -z "${STEAM_CONFIG_VDF}" ]; then
+            echo "::warning::STEAM_USERNAME or STEAM_CONFIG_VDF secret not set; skipping SteamPipe upload."
+            exit 0
+          fi
           mkdir -p "$RUNNER_TEMP/steam-config"
           echo "${STEAM_CONFIG_VDF}" | base64 --decode > "$RUNNER_TEMP/steam-config/config.vdf"
           docker run --rm \
@@ -491,14 +502,23 @@ jobs:
             +quit
 
   # ---------------------------------------------------------------------------
-  # 5. Publish GitHub Release with all downloadable store packages attached
+  # 5. Tag & Publish GitHub Release with all downloadable store packages
   # ---------------------------------------------------------------------------
   github-release:
     name: Publish GitHub Release
     needs: [build-desktop-android, build-apple]
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: inputs.create_github_release == true
     runs-on: ubuntu-latest
     steps:
+      - name: Normalize Tag Name
+        id: tag
+        env:
+          RAW_VERSION: ${{ inputs.release_version }}
+        run: |
+          VER="${RAW_VERSION#v}"
+          echo "tag_name=v${VER}" >> "$GITHUB_OUTPUT"
+          echo "version=${VER}" >> "$GITHUB_OUTPUT"
+
       - name: Download Desktop & Android Packages
         uses: actions/download-artifact@v4
         with:
@@ -511,8 +531,11 @@ jobs:
           name: release-packages-apple
           path: release-assets
 
-      - name: Create GitHub Release
+      - name: Create Tag & GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.tag.outputs.tag_name }}
+          target_commitish: ${{ github.sha }}
+          name: Vector Chess ${{ steps.tag.outputs.tag_name }}
           files: release-assets/*
           generate_release_notes: true
