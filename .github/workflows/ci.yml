@@ -1,4 +1,4 @@
-name: Godot CI
+name: CI & Deploy Web
 
 on:
   push:
@@ -6,9 +6,16 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
 env:
   GODOT_VERSION: "4.3"
-  EXPORT_NAME: "VectorChess"
+  RELEASE_TYPE: "stable"
+  EXPORT_PRESET: "Web"
+  BUILD_PATH: "build/web"
 
 jobs:
   test-and-validate:
@@ -28,76 +35,89 @@ jobs:
         run: |
           godot --headless -s res://tests/test_rules.gd
 
-  export-builds:
-    name: Export Desktop, Mobile & Web Builds
+  build-web:
+    name: Build Web Client (WASM)
     needs: test-and-validate
     runs-on: ubuntu-latest
-    container:
-      image: barichello/godot-ci:4.3
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Setup Export Templates & Editor Settings
-        run: |
-          mkdir -p ~/.local/share/godot/export_templates/${GODOT_VERSION}.stable
-          cp -r /root/.local/share/godot/export_templates/${GODOT_VERSION}.stable/* ~/.local/share/godot/export_templates/${GODOT_VERSION}.stable/ || true
-          mkdir -p ~/.config/godot
-          cp -r /root/.config/godot/* ~/.config/godot/ || true
-          cat <<EOF >> ~/.config/godot/editor_settings-${GODOT_VERSION}.tres
-          export/android/java_sdk_path = "/usr/lib/jvm/java-17-openjdk-amd64"
-          export/android/android_sdk_path = "/usr/lib/android-sdk"
-          export/android/debug_keystore = "/root/debug.keystore"
-          export/android/debug_keystore_user = "androiddebugkey"
-          export/android/debug_keystore_pass = "android"
-          EOF
+      - name: Setup Godot Binary Cache
+        id: godot-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/godot
+          key: godot-${{ env.GODOT_VERSION }}-${{ env.RELEASE_TYPE }}-linux-x86_64
 
-      - name: Import Project
-        run: |
-          godot --headless --import
+      - name: Setup Export Templates Cache
+        id: templates-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/share/godot/export_templates
+          key: godot-templates-${{ env.GODOT_VERSION }}-${{ env.RELEASE_TYPE }}
 
-      - name: Export Windows Desktop
+      - name: Download & Install Godot Binary
+        if: steps.godot-cache.outputs.cache-hit != 'true'
+        env:
+          GODOT_BASE_URL: "https://github.com/godotengine/godot/releases/download/${{ env.GODOT_VERSION }}-${{ env.RELEASE_TYPE }}"
+          GODOT_ZIP: "Godot_v${{ env.GODOT_VERSION }}-${{ env.RELEASE_TYPE }}_linux.x86_64.zip"
         run: |
-          mkdir -p build/windows
-          godot --headless --export-release "Windows Desktop" "build/windows/${EXPORT_NAME}.exe"
-          test -f "build/windows/${EXPORT_NAME}.exe"
-          test -f "build/windows/${EXPORT_NAME}.pck"
+          mkdir -p ~/.cache/godot
+          curl -fsSL "${GODOT_BASE_URL}/${GODOT_ZIP}" -o "/tmp/${GODOT_ZIP}"
+          unzip -q "/tmp/${GODOT_ZIP}" -d ~/.cache/godot
+          mv ~/.cache/godot/Godot_v${{ env.GODOT_VERSION }}-${{ env.RELEASE_TYPE }}_linux.x86_64 ~/.cache/godot/godot
+          chmod +x ~/.cache/godot/godot
+          rm -f "/tmp/${GODOT_ZIP}"
 
-      - name: Export Linux Desktop
+      - name: Download & Install Export Templates
+        if: steps.templates-cache.outputs.cache-hit != 'true'
+        env:
+          GODOT_BASE_URL: "https://github.com/godotengine/godot/releases/download/${{ env.GODOT_VERSION }}-${{ env.RELEASE_TYPE }}"
+          TEMPLATES_TPZ: "Godot_v${{ env.GODOT_VERSION }}-${{ env.RELEASE_TYPE }}_export_templates.tpz"
         run: |
-          mkdir -p build/linux
-          godot --headless --export-release "Linux" "build/linux/${EXPORT_NAME}.x86_64"
-          chmod +x "build/linux/${EXPORT_NAME}.x86_64"
-          test -f "build/linux/${EXPORT_NAME}.x86_64"
-          test -f "build/linux/${EXPORT_NAME}.pck"
+          mkdir -p ~/.local/share/godot/export_templates/${GODOT_VERSION}.${RELEASE_TYPE}
+          curl -fsSL "${GODOT_BASE_URL}/${TEMPLATES_TPZ}" -o "/tmp/${TEMPLATES_TPZ}"
+          unzip -q "/tmp/${TEMPLATES_TPZ}" -d /tmp/godot_templates
+          mv /tmp/godot_templates/templates/* ~/.local/share/godot/export_templates/${GODOT_VERSION}.${RELEASE_TYPE}/
+          rm -rf "/tmp/${TEMPLATES_TPZ}" /tmp/godot_templates
 
-      - name: Export macOS (Universal App Bundle Zip)
+      - name: Add Godot to PATH
         run: |
-          mkdir -p build/macos
-          godot --headless --export-release "macOS" "build/macos/${EXPORT_NAME}.zip"
-          test -f "build/macos/${EXPORT_NAME}.zip"
+          echo "$HOME/.cache/godot" >> "$GITHUB_PATH"
+          $HOME/.cache/godot/godot --version
 
-      - name: Export Android (Debug APK Smoke Test)
-        run: |
-          mkdir -p build/android
-          godot --headless --export-debug "Android (APK)" "build/android/${EXPORT_NAME}.apk"
-          test -f "build/android/${EXPORT_NAME}.apk"
-
-      - name: Export Web (HTML5 / WebAssembly)
+      - name: Import Project & Export Web Build
         shell: bash
         run: |
-          mkdir -p build/web
-          godot --headless --export-release "Web" "build/web/index.html"
+          mkdir -p "${BUILD_PATH}"
+          godot --headless --import
+          godot --headless --export-release "${EXPORT_PRESET}" "${BUILD_PATH}/index.html"
           CACHE_BUST=$(echo "${GITHUB_SHA}" | cut -c1-7)
-          sed -i "s/index\\.js/index.js?v=${CACHE_BUST}/g; s/index\\.png/index.png?v=${CACHE_BUST}/g; s/index\\.icon\\.png/index.icon.png?v=${CACHE_BUST}/g; s/index\\.apple-touch-icon\\.png/index.apple-touch-icon.png?v=${CACHE_BUST}/g" "build/web/index.html"
-          sed -i "s/fetch(file)/fetch(file + '?v=${CACHE_BUST}')/g; s/\\.audio\\.worklet\\.js/.audio.worklet.js?v=${CACHE_BUST}/g" "build/web/index.js"
-          grep -q "index.js?v=${CACHE_BUST}" "build/web/index.html"
-          grep -q "fetch(file + '?v=${CACHE_BUST}')" "build/web/index.js"
-          test -f "build/web/index.html"
+          sed -i "s/index\\.js/index.js?v=${CACHE_BUST}/g; s/index\\.png/index.png?v=${CACHE_BUST}/g; s/index\\.icon\\.png/index.icon.png?v=${CACHE_BUST}/g; s/index\\.apple-touch-icon\\.png/index.apple-touch-icon.png?v=${CACHE_BUST}/g" "${BUILD_PATH}/index.html"
+          sed -i "s/fetch(file)/fetch(file + '?v=${CACHE_BUST}')/g; s/\\.audio\\.worklet\\.js/.audio.worklet.js?v=${CACHE_BUST}/g" "${BUILD_PATH}/index.js"
+          grep -q "index.js?v=${CACHE_BUST}" "${BUILD_PATH}/index.html"
+          grep -q "fetch(file + '?v=${CACHE_BUST}')" "${BUILD_PATH}/index.js"
+          test -f "${BUILD_PATH}/index.html"
+          test -f "${BUILD_PATH}/index.wasm"
+          test -f "${BUILD_PATH}/index.pck"
+          test -f "${BUILD_PATH}/index.js"
 
-      - name: Upload Build Artifacts
-        uses: actions/upload-artifact@v4
+      - name: Upload Pages Artifact
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-pages-artifact@v3
         with:
-          name: vector-chess-builds
-          path: build/
-          if-no-files-found: error
+          path: ${{ env.BUILD_PATH }}
+
+  deploy-web:
+    name: Deploy Live Web Build to GitHub Pages
+    needs: build-web
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: "pages"
+      cancel-in-progress: false
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5
