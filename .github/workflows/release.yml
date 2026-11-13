@@ -1,0 +1,518 @@
+name: Store Release Pipeline
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      release_version:
+        description: "Version string (e.g. 0.2.0) when triggered manually"
+        required: false
+        default: "0.1.0"
+      steam_branch:
+        description: "Steam branch to set live (e.g. beta, default, or empty for none)"
+        required: false
+        default: "beta"
+      upload_to_stores:
+        description: "Upload directly to Steam / Google Play / App Store Connect (if secrets exist)"
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+env:
+  GODOT_VERSION: "4.3"
+  RELEASE_TYPE: "stable"
+  EXPORT_NAME: "VectorChess"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 1. Gate release on headless import & unit test suite
+  # ---------------------------------------------------------------------------
+  test:
+    name: Run Unit Tests
+    runs-on: ubuntu-latest
+    container:
+      image: barichello/godot-ci:4.3
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Import & Run Tests
+        run: |
+          godot --headless --import
+          godot --headless -s res://tests/test_rules.gd
+
+  # ---------------------------------------------------------------------------
+  # 2. Build Windows (Steam), Linux/Deck (Steam), and Android (.aab & .apk)
+  # ---------------------------------------------------------------------------
+  build-desktop-android:
+    name: Build Windows, Linux & Android (.aab)
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Resolve Version
+        id: version
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            VER="${GITHUB_REF#refs/tags/v}"
+          else
+            VER="${{ inputs.release_version || '0.1.0' }}"
+          fi
+          echo "version=${VER}" >> "$GITHUB_OUTPUT"
+          sed -i "s/config\/version=\".*\"/config\/version=\"${VER}\"/g" project.godot
+
+      - name: Setup Java 17 (Required for Godot 4.3 Android Gradle Builds)
+        uses: actions/setup-java@v4
+        with:
+          distribution: "temurin"
+          java-version: "17"
+
+      - name: Cache Godot Binary
+        id: godot-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/godot
+          key: godot-${{ env.GODOT_VERSION }}-${{ env.RELEASE_TYPE }}-linux-x86_64
+
+      - name: Cache Export Templates
+        id: templates-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/share/godot/export_templates
+          key: godot-templates-${{ env.GODOT_VERSION }}-${{ env.RELEASE_TYPE }}
+
+      - name: Install Godot Binary
+        if: steps.godot-cache.outputs.cache-hit != 'true'
+        env:
+          BASE_URL: "https://github.com/godotengine/godot/releases/download/${{ env.GODOT_VERSION }}-${{ env.RELEASE_TYPE }}"
+          ZIP_NAME: "Godot_v${{ env.GODOT_VERSION }}-${{ env.RELEASE_TYPE }}_linux.x86_64.zip"
+        run: |
+          mkdir -p ~/.cache/godot
+          curl -fsSL "${BASE_URL}/${ZIP_NAME}" -o "/tmp/${ZIP_NAME}"
+          unzip -q "/tmp/${ZIP_NAME}" -d ~/.cache/godot
+          mv ~/.cache/godot/Godot_v${{ env.GODOT_VERSION }}-${{ env.RELEASE_TYPE }}_linux.x86_64 ~/.cache/godot/godot
+          chmod +x ~/.cache/godot/godot
+          rm -f "/tmp/${ZIP_NAME}"
+
+      - name: Install Export Templates
+        if: steps.templates-cache.outputs.cache-hit != 'true'
+        env:
+          BASE_URL: "https://github.com/godotengine/godot/releases/download/${{ env.GODOT_VERSION }}-${{ env.RELEASE_TYPE }}"
+          TPZ_NAME: "Godot_v${{ env.GODOT_VERSION }}-${{ env.RELEASE_TYPE }}_export_templates.tpz"
+        run: |
+          mkdir -p ~/.local/share/godot/export_templates/${GODOT_VERSION}.${RELEASE_TYPE}
+          curl -fsSL "${BASE_URL}/${TPZ_NAME}" -o "/tmp/${TPZ_NAME}"
+          unzip -q "/tmp/${TPZ_NAME}" -d /tmp/godot_templates
+          mv /tmp/godot_templates/templates/* ~/.local/share/godot/export_templates/${GODOT_VERSION}.${RELEASE_TYPE}/
+          rm -rf "/tmp/${TPZ_NAME}" /tmp/godot_templates
+
+      - name: Add Godot to PATH & Import Project
+        run: |
+          echo "$HOME/.cache/godot" >> "$GITHUB_PATH"
+          $HOME/.cache/godot/godot --headless --import
+
+      - name: Export Windows & Linux Depots
+        run: |
+          mkdir -p build/windows build/linux dist
+          godot --headless --export-release "Windows Desktop" "build/windows/${EXPORT_NAME}.exe"
+          godot --headless --export-release "Linux" "build/linux/${EXPORT_NAME}.x86_64"
+          chmod +x "build/linux/${EXPORT_NAME}.x86_64"
+
+          # Create standalone release archives + tar Linux depot to preserve +x permissions
+          (cd build/windows && zip -qr "../../dist/${EXPORT_NAME}-Windows-v${{ steps.version.outputs.version }}.zip" .)
+          (cd build/linux && tar -czf "../../dist/${EXPORT_NAME}-Linux-v${{ steps.version.outputs.version }}.tar.gz" .)
+          tar -cf build/steam-linux.tar -C build linux
+
+      - name: Configure Android SDK, Gradle Template & Keystore
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_USER: ${{ secrets.ANDROID_KEYSTORE_USER }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+        run: |
+          # Populate Godot Android Gradle template from export templates
+          TEMPLATE_DIR="$HOME/.local/share/godot/export_templates/${GODOT_VERSION}.${RELEASE_TYPE}"
+          mkdir -p android/build
+          unzip -q -o "${TEMPLATE_DIR}/android_source.zip" -d android/build/
+          chmod +x android/build/gradlew
+          printf "%s.%s" "${GODOT_VERSION}" "${RELEASE_TYPE}" > android/.build_version
+
+          # Accept Android SDK licenses on runner
+          yes | "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+
+          # Setup debug keystore for EditorSettings validation
+          keytool -genkeypair -v -keystore "$RUNNER_TEMP/debug.keystore" \
+            -storepass android -alias androiddebugkey -keypass android \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -dname "CN=Android Debug,O=Android,C=US"
+
+          mkdir -p ~/.config/godot
+          cat <<EOF > ~/.config/godot/editor_settings-${GODOT_VERSION}.tres
+          [gd_resource type="EditorSettings" format=3]
+          [resource]
+          export/android/java_sdk_path = "${JAVA_HOME}"
+          export/android/android_sdk_path = "${ANDROID_HOME}"
+          export/android/debug_keystore = "${RUNNER_TEMP}/debug.keystore"
+          export/android/debug_keystore_user = "androiddebugkey"
+          export/android/debug_keystore_pass = "android"
+          EOF
+
+          # Decode production upload keystore or generate ephemeral keystore for dry-run builds
+          if [ -n "${ANDROID_KEYSTORE_BASE64}" ]; then
+            echo "${ANDROID_KEYSTORE_BASE64}" | base64 --decode > "$RUNNER_TEMP/release.keystore"
+            echo "GODOT_ANDROID_KEYSTORE_RELEASE_PATH=$RUNNER_TEMP/release.keystore" >> "$GITHUB_ENV"
+            echo "GODOT_ANDROID_KEYSTORE_RELEASE_USER=${ANDROID_KEYSTORE_USER}" >> "$GITHUB_ENV"
+            echo "GODOT_ANDROID_KEYSTORE_RELEASE_PASSWORD=${ANDROID_KEYSTORE_PASSWORD}" >> "$GITHUB_ENV"
+            echo '- Android `.aab`: Signed with **Production Upload Keystore**.' >> "$GITHUB_STEP_SUMMARY"
+          else
+            keytool -genkeypair -v -keystore "$RUNNER_TEMP/ephemeral.keystore" \
+              -storepass vectorchess -alias vectorchess -keypass vectorchess \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -dname "CN=Vector Chess Dry Run,O=VectorChess,C=US"
+            echo "GODOT_ANDROID_KEYSTORE_RELEASE_PATH=$RUNNER_TEMP/ephemeral.keystore" >> "$GITHUB_ENV"
+            echo "GODOT_ANDROID_KEYSTORE_RELEASE_USER=vectorchess" >> "$GITHUB_ENV"
+            echo "GODOT_ANDROID_KEYSTORE_RELEASE_PASSWORD=vectorchess" >> "$GITHUB_ENV"
+            echo "::warning::ANDROID_KEYSTORE_BASE64 secret not set; signing .aab with an ephemeral test keystore."
+            echo '- Android `.aab`: Signed with **Ephemeral Test Keystore** (configure `ANDROID_KEYSTORE_BASE64` before Play Store upload).' >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Export Android Play Store (.aab) & Sideload (.apk)
+        run: |
+          mkdir -p build/android dist
+          godot --headless --export-release "Android (Play Store)" "dist/${EXPORT_NAME}-v${{ steps.version.outputs.version }}.aab"
+          godot --headless --export-release "Android (APK)" "dist/${EXPORT_NAME}-v${{ steps.version.outputs.version }}.apk"
+          test -f "dist/${EXPORT_NAME}-v${{ steps.version.outputs.version }}.aab"
+          test -f "dist/${EXPORT_NAME}-v${{ steps.version.outputs.version }}.apk"
+
+      - name: Upload to Google Play (Internal Track)
+        if: >-
+          (startsWith(github.ref, 'refs/tags/v') || inputs.upload_to_stores == true) &&
+          secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON != '' &&
+          secrets.ANDROID_KEYSTORE_BASE64 != ''
+        uses: r0adkll/upload-google-play@v1
+        with:
+          serviceAccountJsonPlainText: ${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}
+          packageName: com.vectorchess.game
+          releaseFiles: dist/${{ env.EXPORT_NAME }}-v${{ steps.version.outputs.version }}.aab
+          track: internal
+          status: draft
+
+      - name: Upload Steam Windows Depot Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: steam-windows
+          path: build/windows/
+          if-no-files-found: error
+
+      - name: Upload Steam Linux Depot Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: steam-linux
+          path: build/steam-linux.tar
+          if-no-files-found: error
+
+      - name: Upload Desktop & Android Release Packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-packages-desktop-android
+          path: dist/
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # 3. Build macOS (Steam Universal .app) & iOS (.ipa) on Mac Mini or GitHub macOS
+  #    Set repo variable USE_SELF_HOSTED_MAC=true once your ARM Mac Mini runner is active.
+  # ---------------------------------------------------------------------------
+  build-apple:
+    name: Build macOS (.app) & iOS (.ipa)
+    needs: test
+    runs-on: ${{ vars.USE_SELF_HOSTED_MAC == 'true' && fromJSON('["self-hosted", "macOS", "ARM64"]') || 'macos-latest' }}
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Resolve Version
+        id: version
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            VER="${GITHUB_REF#refs/tags/v}"
+          else
+            VER="${{ inputs.release_version || '0.1.0' }}"
+          fi
+          echo "version=${VER}" >> "$GITHUB_OUTPUT"
+          sed -i '' "s/config\/version=\".*\"/config\/version=\"${VER}\"/g" project.godot
+          sed -i '' "s/short_version=\".*\"/short_version=\"${VER}\"/g" export_presets.cfg
+          sed -i '' "s/application\/version=\".*\"/application\/version=\"${VER}\"/g" export_presets.cfg
+
+      - name: Cache Godot macOS Binary
+        id: godot-mac-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/godot-macos
+          key: godot-${{ env.GODOT_VERSION }}-${{ env.RELEASE_TYPE }}-macos-universal
+
+      - name: Cache Export Templates (macOS)
+        id: templates-mac-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Application Support/Godot/export_templates
+          key: godot-templates-macos-${{ env.GODOT_VERSION }}-${{ env.RELEASE_TYPE }}
+
+      - name: Install Godot macOS Binary
+        if: steps.godot-mac-cache.outputs.cache-hit != 'true'
+        env:
+          BASE_URL: "https://github.com/godotengine/godot/releases/download/${{ env.GODOT_VERSION }}-${{ env.RELEASE_TYPE }}"
+          ZIP_NAME: "Godot_v${{ env.GODOT_VERSION }}-${{ env.RELEASE_TYPE }}_macos.universal.zip"
+        run: |
+          mkdir -p ~/.cache/godot-macos
+          curl -fsSL "${BASE_URL}/${ZIP_NAME}" -o "/tmp/${ZIP_NAME}"
+          unzip -q "/tmp/${ZIP_NAME}" -d ~/.cache/godot-macos
+          rm -f "/tmp/${ZIP_NAME}"
+
+      - name: Install Export Templates (macOS)
+        if: steps.templates-mac-cache.outputs.cache-hit != 'true'
+        env:
+          BASE_URL: "https://github.com/godotengine/godot/releases/download/${{ env.GODOT_VERSION }}-${{ env.RELEASE_TYPE }}"
+          TPZ_NAME: "Godot_v${{ env.GODOT_VERSION }}-${{ env.RELEASE_TYPE }}_export_templates.tpz"
+        run: |
+          TEMPLATE_DIR="$HOME/Library/Application Support/Godot/export_templates/${GODOT_VERSION}.${RELEASE_TYPE}"
+          mkdir -p "${TEMPLATE_DIR}"
+          curl -fsSL "${BASE_URL}/${TPZ_NAME}" -o "/tmp/${TPZ_NAME}"
+          unzip -q "/tmp/${TPZ_NAME}" -d /tmp/godot_templates
+          mv /tmp/godot_templates/templates/* "${TEMPLATE_DIR}/"
+          rm -rf "/tmp/${TPZ_NAME}" /tmp/godot_templates
+
+      - name: Import Project Headlessly
+        run: |
+          GODOT_BIN="$HOME/.cache/godot-macos/Godot.app/Contents/MacOS/Godot"
+          "${GODOT_BIN}" --headless --import
+
+      - name: Export, Sign & Notarize macOS Universal App (Steam)
+        env:
+          APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_MACOS_CERTIFICATE_BASE64 || secrets.APPLE_CERTIFICATE_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_MACOS_CERTIFICATE_PASSWORD || secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_MACOS_SIGNING_IDENTITY }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+          APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
+        run: |
+          GODOT_BIN="$HOME/.cache/godot-macos/Godot.app/Contents/MacOS/Godot"
+          mkdir -p build/macos dist
+          "${GODOT_BIN}" --headless --export-release "macOS" "build/macos/${EXPORT_NAME}.app"
+          test -d "build/macos/${EXPORT_NAME}.app"
+
+          if [ -n "${APPLE_CERTIFICATE_BASE64}" ]; then
+            KEYCHAIN_PATH="$RUNNER_TEMP/build-macos.keychain-db"
+            KEYCHAIN_PASS=$(uuidgen)
+            echo "${APPLE_CERTIFICATE_BASE64}" | base64 --decode > "$RUNNER_TEMP/macos_cert.p12"
+
+            security create-keychain -p "${KEYCHAIN_PASS}" "${KEYCHAIN_PATH}"
+            security set-keychain-settings -lut 21600 "${KEYCHAIN_PATH}"
+            security unlock-keychain -p "${KEYCHAIN_PASS}" "${KEYCHAIN_PATH}"
+            security import "$RUNNER_TEMP/macos_cert.p12" -P "${APPLE_CERTIFICATE_PASSWORD}" -A -t cert -f pkcs12 -k "${KEYCHAIN_PATH}"
+            security list-keychain -d user -s "${KEYCHAIN_PATH}" $(security list-keychains -d user | tr -d '"')
+            security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "${KEYCHAIN_PASS}" "${KEYCHAIN_PATH}"
+
+            IDENTITY="${APPLE_SIGNING_IDENTITY:-Developer ID Application}"
+            codesign --force --deep --options runtime --timestamp --sign "${IDENTITY}" "build/macos/${EXPORT_NAME}.app"
+
+            if [ -n "${APPLE_API_KEY_ID}" ] && [ -n "${APPLE_API_ISSUER_ID}" ] && [ -n "${APPLE_API_PRIVATE_KEY}" ]; then
+              mkdir -p "$RUNNER_TEMP/private_keys"
+              KEY_FILE="$RUNNER_TEMP/private_keys/AuthKey_${APPLE_API_KEY_ID}.p8"
+              printf "%s\n" "${APPLE_API_PRIVATE_KEY}" > "${KEY_FILE}"
+              ditto -c -k --keepParent "build/macos/${EXPORT_NAME}.app" "$RUNNER_TEMP/${EXPORT_NAME}-notarize.zip"
+              xcrun notarytool submit "$RUNNER_TEMP/${EXPORT_NAME}-notarize.zip" \
+                --key "${KEY_FILE}" \
+                --key-id "${APPLE_API_KEY_ID}" \
+                --issuer "${APPLE_API_ISSUER_ID}" \
+                --wait
+              xcrun stapler staple "build/macos/${EXPORT_NAME}.app"
+              echo '- macOS `.app`: Signed with **Developer ID** and **Notarized**.' >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo '- macOS `.app`: Signed with **Developer ID** (notarization skipped; API key secrets not set).' >> "$GITHUB_STEP_SUMMARY"
+            fi
+            security delete-keychain "${KEYCHAIN_PATH}" || true
+          else
+            codesign --force --deep -s - "build/macos/${EXPORT_NAME}.app"
+            echo "::warning::Apple Developer ID certificate not set; macOS .app is ad-hoc signed."
+            echo '- macOS `.app`: **Ad-hoc signed** (configure `APPLE_MACOS_CERTIFICATE_BASE64` before public Steam macOS launch).' >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          # Preserve bundle symlinks & permissions for GitHub Release and Steam depot
+          ditto -c -k --keepParent "build/macos/${EXPORT_NAME}.app" "dist/${EXPORT_NAME}-macOS-v${{ steps.version.outputs.version }}.zip"
+          tar -cf build/steam-macos.tar -C build macos
+
+      - name: Export iOS (.ipa or Xcode Project)
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_IOS_CERT_BASE64: ${{ secrets.APPLE_IOS_CERTIFICATE_BASE64 || secrets.APPLE_CERTIFICATE_BASE64 }}
+          APPLE_IOS_CERT_PASSWORD: ${{ secrets.APPLE_IOS_CERTIFICATE_PASSWORD || secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_PROVISION_BASE64: ${{ secrets.APPLE_IOS_PROVISIONING_PROFILE_BASE64 }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+          APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
+          UPLOAD_TO_STORES: ${{ startsWith(github.ref, 'refs/tags/v') || inputs.upload_to_stores == true }}
+        run: |
+          GODOT_BIN="$HOME/.cache/godot-macos/Godot.app/Contents/MacOS/Godot"
+          mkdir -p build/ios dist
+
+          if [ -n "${APPLE_TEAM_ID}" ] && [ -n "${APPLE_IOS_CERT_BASE64}" ] && [ -n "${APPLE_PROVISION_BASE64}" ]; then
+            KEYCHAIN_PATH="$RUNNER_TEMP/build-ios.keychain-db"
+            KEYCHAIN_PASS=$(uuidgen)
+            echo "${APPLE_IOS_CERT_BASE64}" | base64 --decode > "$RUNNER_TEMP/ios_cert.p12"
+            echo "${APPLE_PROVISION_BASE64}" | base64 --decode > "$RUNNER_TEMP/profile.mobileprovision"
+
+            security create-keychain -p "${KEYCHAIN_PASS}" "${KEYCHAIN_PATH}"
+            security set-keychain-settings -lut 21600 "${KEYCHAIN_PATH}"
+            security unlock-keychain -p "${KEYCHAIN_PASS}" "${KEYCHAIN_PATH}"
+            security import "$RUNNER_TEMP/ios_cert.p12" -P "${APPLE_IOS_CERT_PASSWORD}" -A -t cert -f pkcs12 -k "${KEYCHAIN_PATH}"
+            security list-keychain -d user -s "${KEYCHAIN_PATH}" $(security list-keychains -d user | tr -d '"')
+            security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "${KEYCHAIN_PASS}" "${KEYCHAIN_PATH}"
+
+            security cms -D -i "$RUNNER_TEMP/profile.mobileprovision" > "$RUNNER_TEMP/profile.plist"
+            PROFILE_UUID=$(/usr/libexec/PlistBuddy -c "Print UUID" "$RUNNER_TEMP/profile.plist")
+            mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
+            cp "$RUNNER_TEMP/profile.mobileprovision" "$HOME/Library/MobileDevice/Provisioning Profiles/${PROFILE_UUID}.mobileprovision"
+
+            sed -i '' "s/application\/app_store_team_id=\"\"/application\/app_store_team_id=\"${APPLE_TEAM_ID}\"/g" export_presets.cfg
+            export GODOT_IOS_PROVISIONING_PROFILE_UUID_RELEASE="${PROFILE_UUID}"
+
+            "${GODOT_BIN}" --headless --export-release "iOS" "dist/${EXPORT_NAME}-v${{ steps.version.outputs.version }}.ipa"
+            test -f "dist/${EXPORT_NAME}-v${{ steps.version.outputs.version }}.ipa"
+            echo '- iOS `.ipa`: Signed for **App Store / TestFlight**.' >> "$GITHUB_STEP_SUMMARY"
+
+            if [ "${UPLOAD_TO_STORES}" = "true" ] && [ -n "${APPLE_API_KEY_ID}" ] && [ -n "${APPLE_API_ISSUER_ID}" ] && [ -n "${APPLE_API_PRIVATE_KEY}" ]; then
+              mkdir -p ~/.appstoreconnect/private_keys
+              printf "%s\n" "${APPLE_API_PRIVATE_KEY}" > ~/.appstoreconnect/private_keys/AuthKey_${APPLE_API_KEY_ID}.p8
+              xcrun altool --upload-app --type ios \
+                -f "dist/${EXPORT_NAME}-v${{ steps.version.outputs.version }}.ipa" \
+                --apiKey "${APPLE_API_KEY_ID}" \
+                --apiIssuer "${APPLE_API_ISSUER_ID}"
+              rm -rf ~/.appstoreconnect/private_keys
+              echo '- iOS `.ipa`: Uploaded to **App Store Connect / TestFlight**.' >> "$GITHUB_STEP_SUMMARY"
+            fi
+
+            security delete-keychain "${KEYCHAIN_PATH}" || true
+          else
+            sed -i '' 's/application\/app_store_team_id=""/application\/app_store_team_id="0000000000"/g' export_presets.cfg
+            sed -i '' 's/application\/export_project_only=false/application\/export_project_only=true/g' export_presets.cfg
+            "${GODOT_BIN}" --headless --export-release "iOS" "build/ios/${EXPORT_NAME}.ipa"
+            ditto -c -k --keepParent "build/ios" "dist/${EXPORT_NAME}-iOS-XcodeProject-v${{ steps.version.outputs.version }}.zip"
+            echo "::warning::Apple iOS signing secrets not configured; exported unsigned Xcode project archive instead of .ipa."
+            echo '- iOS: **Xcode Project** exported (configure `APPLE_TEAM_ID`, `APPLE_IOS_CERTIFICATE_BASE64`, and `APPLE_IOS_PROVISIONING_PROFILE_BASE64` to output signed `.ipa`).' >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload Steam macOS Depot Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: steam-macos
+          path: build/steam-macos.tar
+          if-no-files-found: error
+
+      - name: Upload Apple Release Packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-packages-apple
+          path: dist/
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # 4. Upload Windows, Linux, and macOS Depots to SteamPipe (when configured)
+  # ---------------------------------------------------------------------------
+  deploy-steam:
+    name: Deploy to SteamPipe
+    needs: [build-desktop-android, build-apple]
+    if: >-
+      (startsWith(github.ref, 'refs/tags/v') || inputs.upload_to_stores == true) &&
+      vars.STEAM_APP_ID != '' &&
+      secrets.STEAM_USERNAME != '' &&
+      secrets.STEAM_CONFIG_VDF != ''
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Download Windows Depot
+        uses: actions/download-artifact@v4
+        with:
+          name: steam-windows
+          path: build/windows
+
+      - name: Download Linux Depot
+        uses: actions/download-artifact@v4
+        with:
+          name: steam-linux
+          path: /tmp/steam-linux
+
+      - name: Download macOS Depot
+        uses: actions/download-artifact@v4
+        with:
+          name: steam-macos
+          path: /tmp/steam-macos
+
+      - name: Unpack Depots & Populate SteamPipe VDFs
+        env:
+          STEAM_APP_ID: ${{ vars.STEAM_APP_ID }}
+          DEPOT_WIN: ${{ vars.STEAM_DEPOT_WINDOWS }}
+          DEPOT_LIN: ${{ vars.STEAM_DEPOT_LINUX }}
+          DEPOT_MAC: ${{ vars.STEAM_DEPOT_MACOS }}
+          SET_LIVE: ${{ inputs.steam_branch || 'beta' }}
+        run: |
+          mkdir -p build steam/output
+          tar -xf /tmp/steam-linux/steam-linux.tar -C build
+          tar -xf /tmp/steam-macos/steam-macos.tar -C build
+
+          DESC="Vector Chess ${GITHUB_REF_NAME} (${GITHUB_SHA::7})"
+          sed -i "s/__STEAM_APP_ID__/${STEAM_APP_ID}/g" steam/*.vdf
+          sed -i "s/__STEAM_DEPOT_WINDOWS__/${DEPOT_WIN}/g" steam/*.vdf
+          sed -i "s/__STEAM_DEPOT_LINUX__/${DEPOT_LIN}/g" steam/*.vdf
+          sed -i "s/__STEAM_DEPOT_MACOS__/${DEPOT_MAC}/g" steam/*.vdf
+          sed -i "s/__BUILD_DESCRIPTION__/${DESC}/g" steam/app_build.vdf
+          sed -i "s/__SET_LIVE_BRANCH__/${SET_LIVE}/g" steam/app_build.vdf
+
+      - name: Upload Build via SteamCMD Container
+        env:
+          STEAM_USERNAME: ${{ secrets.STEAM_USERNAME }}
+          STEAM_CONFIG_VDF: ${{ secrets.STEAM_CONFIG_VDF }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/steam-config"
+          echo "${STEAM_CONFIG_VDF}" | base64 --decode > "$RUNNER_TEMP/steam-config/config.vdf"
+          docker run --rm \
+            -v "$(pwd):/workspace" \
+            -v "$RUNNER_TEMP/steam-config:/root/Steam/config" \
+            steamcmd/steamcmd:latest \
+            +login "${STEAM_USERNAME}" \
+            +run_app_build /workspace/steam/app_build.vdf \
+            +quit
+
+  # ---------------------------------------------------------------------------
+  # 5. Publish GitHub Release with all downloadable store packages attached
+  # ---------------------------------------------------------------------------
+  github-release:
+    name: Publish GitHub Release
+    needs: [build-desktop-android, build-apple]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download Desktop & Android Packages
+        uses: actions/download-artifact@v4
+        with:
+          name: release-packages-desktop-android
+          path: release-assets
+
+      - name: Download Apple Packages
+        uses: actions/download-artifact@v4
+        with:
+          name: release-packages-apple
+          path: release-assets
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/*
+          generate_release_notes: true

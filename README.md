@@ -13,3 +13,6 @@ Open the repository folder in **Godot 4.3+** and press **F5**, or run from the c
 ```bash
 godot --path .
 ```
+
+## Building & Store Releases
+Automated GitHub Actions pipelines build and package releases for **Steam (Windows, Linux, macOS)**, **Google Play (`.aab`)**, and **iOS App Store (`.ipa`)**. See [docs/RELEASING.md](docs/RELEASING.md) for runner setup and signing configuration.

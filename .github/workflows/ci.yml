@@ -29,7 +29,7 @@ jobs:
           godot --headless -s res://tests/test_rules.gd
 
   export-builds:
-    name: Export Desktop & Web Builds
+    name: Export Desktop, Mobile & Web Builds
     needs: test-and-validate
     runs-on: ubuntu-latest
     container:
@@ -38,10 +38,19 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Setup Export Templates
+      - name: Setup Export Templates & Editor Settings
         run: |
           mkdir -p ~/.local/share/godot/export_templates/${GODOT_VERSION}.stable
           cp -r /root/.local/share/godot/export_templates/${GODOT_VERSION}.stable/* ~/.local/share/godot/export_templates/${GODOT_VERSION}.stable/ || true
+          mkdir -p ~/.config/godot
+          cp -r /root/.config/godot/* ~/.config/godot/ || true
+          cat <<EOF >> ~/.config/godot/editor_settings-${GODOT_VERSION}.tres
+          export/android/java_sdk_path = "/usr/lib/jvm/java-17-openjdk-amd64"
+          export/android/android_sdk_path = "/usr/lib/android-sdk"
+          export/android/debug_keystore = "/root/debug.keystore"
+          export/android/debug_keystore_user = "androiddebugkey"
+          export/android/debug_keystore_pass = "android"
+          EOF
 
       - name: Import Project
         run: |
@@ -52,18 +61,27 @@ jobs:
           mkdir -p build/windows
           godot --headless --export-release "Windows Desktop" "build/windows/${EXPORT_NAME}.exe"
           test -f "build/windows/${EXPORT_NAME}.exe"
+          test -f "build/windows/${EXPORT_NAME}.pck"
 
       - name: Export Linux Desktop
         run: |
           mkdir -p build/linux
           godot --headless --export-release "Linux" "build/linux/${EXPORT_NAME}.x86_64"
+          chmod +x "build/linux/${EXPORT_NAME}.x86_64"
           test -f "build/linux/${EXPORT_NAME}.x86_64"
+          test -f "build/linux/${EXPORT_NAME}.pck"
 
       - name: Export macOS (Universal App Bundle Zip)
         run: |
           mkdir -p build/macos
           godot --headless --export-release "macOS" "build/macos/${EXPORT_NAME}.zip"
           test -f "build/macos/${EXPORT_NAME}.zip"
+
+      - name: Export Android (Debug APK Smoke Test)
+        run: |
+          mkdir -p build/android
+          godot --headless --export-debug "Android (APK)" "build/android/${EXPORT_NAME}.apk"
+          test -f "build/android/${EXPORT_NAME}.apk"
 
       - name: Export Web (HTML5 / WebAssembly)
         shell: bash

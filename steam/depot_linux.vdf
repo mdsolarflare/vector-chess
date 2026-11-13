@@ -1,0 +1,10 @@
+"DepotBuild"
+{
+	"DepotID" "__STEAM_DEPOT_LINUX__"
+	"FileMapping"
+	{
+		"LocalPath" "linux/*"
+		"DepotPath" "."
+		"recursive" "1"
+	}
+}

@@ -1,0 +1,11 @@
+"DepotBuild"
+{
+	"DepotID" "__STEAM_DEPOT_WINDOWS__"
+	"FileMapping"
+	{
+		"LocalPath" "windows/*"
+		"DepotPath" "."
+		"recursive" "1"
+	}
+	"FileExclusion" "*.pdb"
+}
