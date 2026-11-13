@@ -1,0 +1,10 @@
+"DepotBuild"
+{
+	"DepotID" "__STEAM_DEPOT_MACOS__"
+	"FileMapping"
+	{
+		"LocalPath" "macos/VectorChess.app/*"
+		"DepotPath" "VectorChess.app"
+		"recursive" "1"
+	}
+}

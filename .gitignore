@@ -11,6 +11,22 @@ export_credentials.cfg
 # Export build artifacts
 build/
 
+# Android Gradle build template & caches (populated during AAB export)
+android/build/
+android/.build_version
+android/.gradle/
+
+# Signing credentials & certificates (never commit)
+*.keystore
+*.jks
+*.p12
+*.cer
+*.mobileprovision
+*.p8
+
+# SteamPipe build logs & output cache
+steam/output/
+
 # Imported translations (automatically generated from CSV files)
 *.translation
 
