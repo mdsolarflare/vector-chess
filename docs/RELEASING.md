@@ -1,16 +1,19 @@
 # Store Release & Runner Guide
 
-This repository uses [`.github/workflows/release.yml`](../.github/workflows/release.yml) to build, sign, and publish store-ready packages for **Steam (Windows, Linux/Steam Deck, macOS)**, **Google Play (Android)**, and **Apple App Store / TestFlight (iOS)**.
+This repository splits CI/CD into two focused workflows:
+* **[`ci.yml`](../.github/workflows/ci.yml) (`CI & Deploy Web`):** Runs unit tests on every PR/push and automatically deploys the live Web (WASM) build to GitHub Pages on `main`.
+* **[`release.yml`](../.github/workflows/release.yml) (`Store Release Pipeline`):** Manually triggered once you are happy with the live Web build to build, sign, upload, and tag store releases for **Steam (Windows, Linux/Steam Deck, macOS)**, **Google Play (Android)**, and **Apple App Store / TestFlight (iOS)**.
 
-## 1. Triggering a Release
+## 1. Triggering a Store Release
 
-* **Tag Release (Full Pipeline + GitHub Release):**
-  ```bash
-  git tag v0.2.0
-  git push origin v0.2.0
-  ```
-* **Manual Dry-Run / Test Build:**
-  Go to **Actions → Store Release Pipeline → Run workflow**. Even before any store secrets are configured, the workflow builds all packages (using ephemeral/ad-hoc signing) so you can verify and download artifacts.
+1. Verify the live Web build deployed by `CI & Deploy Web` on `main`.
+2. Open **Actions → Store Release Pipeline → Run workflow** in GitHub:
+   * **`release_version`:** Enter the semantic version (e.g. `0.2.0`).
+   * **`steam_branch`:** Branch to set live on Steam (`beta`, `default`, or leave blank to upload without setting live).
+   * **`upload_to_stores`:** Keep checked to push directly to Steam, Google Play, and App Store Connect (when secrets exist), or uncheck for a dry-run build.
+   * **`create_github_release`:** Keep checked to automatically create git tag `v<release_version>` and publish a GitHub Release with all built packages attached.
+
+*(Even before store secrets are configured, running the workflow builds all packages using ephemeral/ad-hoc signing so you can download and inspect artifacts.)*
 
 ---
 
