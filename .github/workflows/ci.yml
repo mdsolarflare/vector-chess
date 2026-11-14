@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 env:
-  GODOT_VERSION: "4.3"
+  GODOT_VERSION: "4.7.2"
   EXPORT_NAME: "VectorChess"
 
 jobs:
@@ -15,7 +15,7 @@ jobs:
     name: Headless Import & Unit Tests
     runs-on: ubuntu-latest
     container:
-      image: barichello/godot-ci:4.3
+      image: barichello/godot-ci:4.7.2
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -33,18 +33,22 @@ jobs:
     needs: test-and-validate
     runs-on: ubuntu-latest
     container:
-      image: barichello/godot-ci:4.3
+      image: barichello/godot-ci:4.7.2
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
       - name: Setup Export Templates & Editor Settings
         run: |
+          GODOT_MINOR=$(echo "${GODOT_VERSION}" | cut -d. -f1,2)
           mkdir -p ~/.local/share/godot/export_templates/${GODOT_VERSION}.stable
           cp -r /root/.local/share/godot/export_templates/${GODOT_VERSION}.stable/* ~/.local/share/godot/export_templates/${GODOT_VERSION}.stable/ || true
           mkdir -p ~/.config/godot
           cp -r /root/.config/godot/* ~/.config/godot/ || true
-          cat <<EOF >> ~/.config/godot/editor_settings-${GODOT_VERSION}.tres
+          if [ ! -f ~/.config/godot/editor_settings-${GODOT_MINOR}.tres ]; then
+            printf '[gd_resource type="EditorSettings" format=3]\n[resource]\n' > ~/.config/godot/editor_settings-${GODOT_MINOR}.tres
+          fi
+          cat <<EOF >> ~/.config/godot/editor_settings-${GODOT_MINOR}.tres
           export/android/java_sdk_path = "/usr/lib/jvm/java-17-openjdk-amd64"
           export/android/android_sdk_path = "/usr/lib/android-sdk"
           export/android/debug_keystore = "/root/debug.keystore"
