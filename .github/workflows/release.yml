@@ -148,6 +148,7 @@ jobs:
           TEMPLATE_DIR="$HOME/.local/share/godot/export_templates/${GODOT_VERSION}.${RELEASE_TYPE}"
           mkdir -p android/build
           unzip -q -o "${TEMPLATE_DIR}/android_source.zip" -d android/build/
+          touch android/build/.gdignore
           chmod +x android/build/gradlew
           printf "%s.%s" "${GODOT_VERSION}" "${RELEASE_TYPE}" > android/.build_version
 
