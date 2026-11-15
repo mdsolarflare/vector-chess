@@ -1,7 +1,7 @@
-[gd_scene load_steps=6 format=3 uid="uid://c8vectorchess01"]
+[gd_scene format=3 uid="uid://dy1nwdii178b5"]
 
-[ext_resource type="Script" path="res://scripts/main.gd" id="1_main"]
-[ext_resource type="Script" path="res://scripts/board/vector_board.gd" id="2_board"]
+[ext_resource type="Script" uid="uid://ces8txpki7mm1" path="res://scripts/main.gd" id="1_main"]
+[ext_resource type="Script" uid="uid://cvhh1gp73ye63" path="res://scripts/board/vector_board.gd" id="2_board"]
 
 [sub_resource type="StyleBoxFlat" id="StyleBoxFlat_panel"]
 bg_color = Color(0.0627451, 0.0784314, 0.129412, 0.95)

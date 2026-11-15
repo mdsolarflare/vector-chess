@@ -12,7 +12,7 @@ permissions:
   id-token: write
 
 env:
-  GODOT_VERSION: "4.3"
+  GODOT_VERSION: "4.7.2"
   RELEASE_TYPE: "stable"
   EXPORT_PRESET: "Web"
   BUILD_PATH: "build/web"
@@ -22,7 +22,7 @@ jobs:
     name: Headless Import & Unit Tests
     runs-on: ubuntu-latest
     container:
-      image: barichello/godot-ci:4.3
+      image: barichello/godot-ci:4.7.2
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4

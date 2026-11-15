@@ -9,7 +9,7 @@ A cross-platform hexagonal chess game built with **Godot 4** (GDScript) featurin
 - **Platforms:** Windows, Linux, macOS, Web, Android, and iOS
 
 ## Running the Project
-Open the repository folder in **Godot 4.3+** and press **F5**, or run from the command line:
+Open the repository folder in **Godot 4.7+** and press **F5**, or run from the command line:
 ```bash
 godot --path .
 ```
