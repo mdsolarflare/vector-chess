@@ -658,7 +658,7 @@ func _test_ai_player_async_move_selection() -> void:
 		_is_move_in_list(async_hard, opening_moves),
 		"choose_move_async (Hard, active SceneTree) returns a valid legal opening move (%d frame yields in %d ms)" % [
 			frames_yielded,
-			hard_usec / 1000,
+			roundi(float(hard_usec) * 0.001),
 		]
 	)
 	_assert(
