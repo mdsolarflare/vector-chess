@@ -5,6 +5,13 @@ extends SceneTree
 const MainScript = preload("res://scripts/main.gd")
 const MainScene = preload("res://scenes/main.tscn")
 
+const VALID_PROMOTION_TYPES: Array[PieceData.Type] = [
+	PieceData.Type.QUEEN,
+	PieceData.Type.ROOK,
+	PieceData.Type.BISHOP,
+	PieceData.Type.KNIGHT,
+]
+
 var _tests_run: int = 0
 var _tests_failed: int = 0
 
@@ -53,11 +60,17 @@ func _assert(condition: bool, message: String) -> void:
 func _is_move_in_list(candidate: GameRules.VectorMove, moves: Array[GameRules.VectorMove]) -> bool:
 	if candidate == null:
 		return false
+	if candidate.is_promotion and not VALID_PROMOTION_TYPES.has(candidate.promotion_type):
+		return false
 	for mv in moves:
 		if (
 			mv.piece_id == candidate.piece_id
 			and mv.from == candidate.from
 			and mv.to == candidate.to
+			and mv.is_capture == candidate.is_capture
+			and mv.is_en_passant == candidate.is_en_passant
+			and mv.captured_piece_id == candidate.captured_piece_id
+			and mv.captured_pos == candidate.captured_pos
 			and mv.is_promotion == candidate.is_promotion
 		):
 			return true
@@ -689,6 +702,76 @@ func _test_ai_player_async_move_selection() -> void:
 		and _is_move_in_list(null_med, compact_legal)
 		and _is_move_in_list(null_hard, compact_legal),
 		"choose_move_async with null SceneTree falls back cleanly across Easy, Medium, and Hard"
+	)
+
+	# Verify 1-pawn capture-promotion expands into 2 [=Q, =N] candidates (bypassing legal_moves.size() == 1 fast path):
+	# Cyan King on f1 (0, 5) is immobilized by Magenta Rooks on e6/g6 and Bishop on d1, leaving e10xf11 as Cyan's sole raw move.
+	# Magenta King on a6 (-5, 0) is self-blocked except along the f11->a6 (-1, +1) ray, so e10xf11=Q# is mate in 1 (zero jitter).
+	var single_promo := GameRules.new()
+	single_promo.pieces.clear()
+	single_promo._spawn_piece(PieceData.Team.CYAN, PieceData.Type.KING, GameRules.algebraic_to_axial("f1"))
+	single_promo._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.ROOK, GameRules.algebraic_to_axial("e6"))
+	single_promo._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.ROOK, GameRules.algebraic_to_axial("g6"))
+	single_promo._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.BISHOP, GameRules.algebraic_to_axial("d1"))
+	single_promo._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.KING, Vector2i(-5, 0))
+	for blk in [Vector2i(-4, 0), Vector2i(-5, 1), Vector2i(-3, -1), Vector2i(-4, 1)]:
+		single_promo._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.PAWN, blk)
+	single_promo._spawn_piece(PieceData.Team.CYAN, PieceData.Type.PAWN, GameRules.algebraic_to_axial("e10"))
+	var promo_victim := single_promo._spawn_piece(
+		PieceData.Team.MAGENTA,
+		PieceData.Type.KNIGHT,
+		GameRules.algebraic_to_axial("f11")
+	)
+	var raw_promo_moves := single_promo.get_all_legal_moves(PieceData.Team.CYAN)
+	var promo_choice := await ai.choose_move_async(single_promo, PieceData.Team.CYAN, AIPlayer.Difficulty.HARD, self)
+	_assert(
+		raw_promo_moves.size() == 1
+		and _is_move_in_list(promo_choice, raw_promo_moves)
+		and promo_choice.is_capture
+		and promo_choice.captured_piece_id == promo_victim.id
+		and promo_choice.promotion_type == PieceData.Type.QUEEN,
+		"choose_move_async expands sole capture-promotion e10xf11 into [=Q, =N] and selects =Q"
+	)
+
+	# Verify _is_move_in_list rejects invalid promotion types (PAWN/KING) and mismatched capture metadata
+	var bad_promo_king := promo_choice.duplicate_move()
+	bad_promo_king.promotion_type = PieceData.Type.KING
+	var bad_promo_pawn := promo_choice.duplicate_move()
+	bad_promo_pawn.promotion_type = PieceData.Type.PAWN
+	var bad_capture_flag := promo_choice.duplicate_move()
+	bad_capture_flag.is_capture = false
+	_assert(
+		not _is_move_in_list(bad_promo_king, raw_promo_moves)
+		and not _is_move_in_list(bad_promo_pawn, raw_promo_moves)
+		and not _is_move_in_list(bad_capture_flag, raw_promo_moves),
+		"_is_move_in_list rejects invalid promotion types (KING/PAWN) and mismatched capture metadata"
+	)
+
+	# Verify async Knight underpromotion (=N) selection via smothered checkmate in 1:
+	# Magenta King at h8 (2, -4) is surrounded on all 11 in-bounds adjacent hexes by friendly Magenta pawns;
+	# f10->f11=N# delivers unblockable Knight checkmate via (+2, +1), whereas f10->f11=Q does not check h8.
+	var smothered_rules := GameRules.new()
+	smothered_rules.pieces.clear()
+	smothered_rules._spawn_piece(PieceData.Team.CYAN, PieceData.Type.KING, GameRules.algebraic_to_axial("a1"))
+	smothered_rules._spawn_piece(PieceData.Team.CYAN, PieceData.Type.PAWN, GameRules.algebraic_to_axial("f10"))
+	var m_king_pos := GameRules.algebraic_to_axial("h8")
+	smothered_rules._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.KING, m_king_pos)
+	for dir_vec in GameRules.ORTHO_DIRS + GameRules.DIAG_DIRS:
+		var adj: Vector2i = m_king_pos + dir_vec
+		if GameRules.is_inside_board(adj):
+			smothered_rules._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.PAWN, adj)
+
+	var smothered_legal := smothered_rules.get_all_legal_moves(PieceData.Team.CYAN)
+	var smothered_easy := await ai.choose_move_async(smothered_rules, PieceData.Team.CYAN, AIPlayer.Difficulty.EASY, self)
+	var smothered_hard := await ai.choose_move_async(smothered_rules, PieceData.Team.CYAN, AIPlayer.Difficulty.HARD, self)
+	_assert(
+		_is_move_in_list(smothered_easy, smothered_legal)
+		and smothered_easy.promotion_type == PieceData.Type.KNIGHT
+		and _is_move_in_list(smothered_hard, smothered_legal)
+		and smothered_hard.is_promotion
+		and smothered_hard.to == GameRules.algebraic_to_axial("f11")
+		and smothered_hard.promotion_type == PieceData.Type.KNIGHT,
+		"choose_move_async selects Knight underpromotion f10->f11=N# for smothered mate in 1"
 	)
 
 	# Verify single-legal-move fast path and game-over empty-move null return
