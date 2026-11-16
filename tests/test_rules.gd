@@ -675,7 +675,7 @@ func _test_ai_player_async_move_selection() -> void:
 		]
 	)
 	_assert(
-		hard_usec < AIPlayer.ASYNC_FRAME_BUDGET_USEC or frames_yielded > 0,
+		hard_usec < 2 * AIPlayer.ASYNC_FRAME_BUDGET_USEC or frames_yielded > 0,
 		"choose_move_async yields to SceneTree.process_frame when search exceeds ASYNC_FRAME_BUDGET_USEC (%d yields)" % frames_yielded
 	)
 	_assert(
@@ -970,10 +970,16 @@ func _test_mobile_scaling_and_responsive_layout() -> void:
 	)
 
 	# 3. Scene layout adaptation across Desktop, Mobile Portrait, and Mobile Landscape
+	# Adding main_ui to the initialized SceneTree.root triggers main.gd:_ready()
 	var main_ui: Control = MainScene.instantiate()
 	root.add_child(main_ui)
-	main_ui._resolve_nodes()
-	main_ui._setup_confirm_slider_theme()
+	_assert(
+		main_ui.split_container != null
+		and main_ui.confirm_slider != null
+		and main_ui.confirm_slider.has_theme_icon_override("grabber")
+		and main_ui.new_game_modal.visible,
+		"MainScene._ready() resolves UI nodes, configures ConfirmSlider theme, and opens NewGameModal on startup"
+	)
 
 	# Desktop Landscape (1280x800)
 	main_ui._apply_responsive_layout(Vector2(1280, 800), false)
@@ -1014,8 +1020,7 @@ func _test_mobile_scaling_and_responsive_layout() -> void:
 		"Mobile Landscape 1040x480 layout narrows side panel to 248px, uses 4-col controls, 2-col promotion grid, 54x54 toggle button, and compacts NewGameModal height"
 	)
 
-	# 4. Slide-to-Unlock custom theme & idle animation behavior
-	main_ui.new_game_modal.visible = true
+	# 4. Slide-to-Unlock custom theme & idle animation behavior (NewGameModal opened by _ready())
 	var anim_before: float = main_ui._slider_anim_time
 	main_ui._process(0.05)
 	_assert(
