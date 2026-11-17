@@ -5,11 +5,22 @@ extends SceneTree
 const MainScript = preload("res://scripts/main.gd")
 const MainScene = preload("res://scenes/main.tscn")
 
+const VALID_PROMOTION_TYPES: Array[PieceData.Type] = [
+	PieceData.Type.QUEEN,
+	PieceData.Type.ROOK,
+	PieceData.Type.BISHOP,
+	PieceData.Type.KNIGHT,
+]
+
 var _tests_run: int = 0
 var _tests_failed: int = 0
 
 
-func _init() -> void:
+func _initialize() -> void:
+	_run_all_tests()
+
+
+func _run_all_tests() -> void:
 	print("=== Vector Chess Headless Test Suite ===")
 	_test_board_geometry_and_coordinates()
 	_test_initial_glinski_setup()
@@ -22,6 +33,7 @@ func _init() -> void:
 	_test_spatial_index_and_reverse_attack_check()
 	_test_piece_faceted_meshes()
 	_test_ai_player_move_selection()
+	await _test_ai_player_async_move_selection()
 	_test_software_renderer_detection()
 	_test_vector_board_caching_and_idle_redraw()
 	_test_mobile_scaling_and_responsive_layout()
@@ -43,6 +55,26 @@ func _assert(condition: bool, message: String) -> void:
 		printerr("  [FAIL] %s" % message)
 	else:
 		print("  [PASS] %s" % message)
+
+
+func _is_move_in_list(candidate: GameRules.VectorMove, moves: Array[GameRules.VectorMove]) -> bool:
+	if candidate == null:
+		return false
+	if candidate.is_promotion and not VALID_PROMOTION_TYPES.has(candidate.promotion_type):
+		return false
+	for mv in moves:
+		if (
+			mv.piece_id == candidate.piece_id
+			and mv.from == candidate.from
+			and mv.to == candidate.to
+			and mv.is_capture == candidate.is_capture
+			and mv.is_en_passant == candidate.is_en_passant
+			and mv.captured_piece_id == candidate.captured_piece_id
+			and mv.captured_pos == candidate.captured_pos
+			and mv.is_promotion == candidate.is_promotion
+		):
+			return true
+	return false
 
 
 func _test_board_geometry_and_coordinates() -> void:
@@ -113,6 +145,10 @@ func _test_pawn_double_step_and_en_passant() -> void:
 		rules.en_passant_target == GameRules.algebraic_to_axial("e5"),
 		"Double-step sets en_passant_target to skipped cell e5"
 	)
+	_assert(
+		rules.move_history.back()["notation"] == "P e4->e6  d(+0,-2)",
+		"Double-step records notation 'P e4->e6  d(+0,-2)'"
+	)
 
 	var mag_moves := rules.get_legal_moves_for_piece(mag_pawn)
 	var ep_move: GameRules.VectorMove = null
@@ -125,10 +161,101 @@ func _test_pawn_double_step_and_en_passant() -> void:
 	if ep_move != null:
 		rules.execute_move(ep_move)
 		_assert(rules.get_piece_by_id(cyan_pawn.id) == null, "En passant removes captured Cyan pawn from board")
+		_assert(
+			rules.move_history.back()["notation"] == "P d5xe5 e.p.  d(+1,+0)",
+			"En passant capture records notation 'P d5xe5 e.p.  d(+1,+0)'"
+		)
+
+	# Orthogonal 2-pawn discovered check pin:
+	# Along r = 0, Cyan Rook at b6 (-4, 0) attacks Magenta King at h4 (2, 0) through e6 (-1, 0) and f6 (0, 0).
+	# After Cyan pawn double-steps e4 -> e6, vacating BOTH f6 and e6 via en passant f6xe5 exposes h4 to check,
+	# even though quiet step f6 -> f5 leaves e6 occupied and remains legal.
+	var ortho_pin_rules := GameRules.new()
+	ortho_pin_rules.pieces.clear()
+	ortho_pin_rules._spawn_piece(PieceData.Team.CYAN, PieceData.Type.KING, GameRules.algebraic_to_axial("a1"))
+	ortho_pin_rules._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.KING, GameRules.algebraic_to_axial("h4"))
+	ortho_pin_rules._spawn_piece(PieceData.Team.CYAN, PieceData.Type.ROOK, GameRules.algebraic_to_axial("b6"))
+	var pinned_mag_pawn := ortho_pin_rules._spawn_piece(
+		PieceData.Team.MAGENTA,
+		PieceData.Type.PAWN,
+		GameRules.algebraic_to_axial("f6")
+	)
+	var ep_cyan_pawn := ortho_pin_rules._spawn_piece(
+		PieceData.Team.CYAN,
+		PieceData.Type.PAWN,
+		GameRules.algebraic_to_axial("e4")
+	)
+
+	var ep_setup_move: GameRules.VectorMove = null
+	for mv in ortho_pin_rules.get_legal_moves_for_piece(ep_cyan_pawn):
+		if mv.is_double_step:
+			ep_setup_move = mv
+			break
+	ortho_pin_rules.execute_move(ep_setup_move)
+
+	var pinned_moves := ortho_pin_rules.get_legal_moves_for_piece(pinned_mag_pawn)
+	var has_illegal_ep := false
+	var has_legal_quiet_step := false
+	var target_f5 := GameRules.algebraic_to_axial("f5")
+	for mv in pinned_moves:
+		if mv.is_en_passant:
+			has_illegal_ep = true
+		elif mv.to == target_f5:
+			has_legal_quiet_step = true
+
+	var mag_tactical := ortho_pin_rules.get_all_tactical_moves(PieceData.Team.MAGENTA)
+	var has_tactical_ep := false
+	for mv in mag_tactical:
+		if mv.is_en_passant:
+			has_tactical_ep = true
+
+	_assert(
+		not has_illegal_ep and not has_tactical_ep,
+		"En passant f6xe5 that removes both pawns on r=0 ray and exposes Magenta King to Rook check is rejected"
+	)
+	_assert(
+		has_legal_quiet_step,
+		"Quiet step f6->f5 remains legal because captured Cyan pawn on e6 still blocks the r=0 Rook ray"
+	)
+	_assert(
+		_verify_spatial_index_invariants(ortho_pin_rules),
+		"Spatial grid invariants remain intact after pinned en passant check simulation"
+	)
+
+	# Diagonal Bishop ray pin on en passant:
+	# Cyan Bishop at c3 (-3, 3) pins Magenta pawn at d5 (-2, 1) against Magenta King at e7 (-1, -1) along (1, -2).
+	var diag_pin_rules := GameRules.new()
+	diag_pin_rules.pieces.clear()
+	diag_pin_rules._spawn_piece(PieceData.Team.CYAN, PieceData.Type.KING, GameRules.algebraic_to_axial("a1"))
+	diag_pin_rules._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.KING, GameRules.algebraic_to_axial("e7"))
+	diag_pin_rules._spawn_piece(PieceData.Team.CYAN, PieceData.Type.BISHOP, GameRules.algebraic_to_axial("c3"))
+	var diag_mag_pawn := diag_pin_rules._spawn_piece(
+		PieceData.Team.MAGENTA,
+		PieceData.Type.PAWN,
+		GameRules.algebraic_to_axial("d5")
+	)
+	var diag_cyan_pawn := diag_pin_rules._spawn_piece(
+		PieceData.Team.CYAN,
+		PieceData.Type.PAWN,
+		GameRules.algebraic_to_axial("e4")
+	)
+	for mv in diag_pin_rules.get_legal_moves_for_piece(diag_cyan_pawn):
+		if mv.is_double_step:
+			diag_pin_rules.execute_move(mv)
+			break
+
+	var diag_ep_found := false
+	for mv in diag_pin_rules.get_legal_moves_for_piece(diag_mag_pawn):
+		if mv.is_en_passant:
+			diag_ep_found = true
+	_assert(
+		not diag_ep_found,
+		"En passant d5xe5 by diagonally pinned pawn is rejected when vacating d5 exposes King to Bishop ray"
+	)
 
 
 func _test_pawn_promotion() -> void:
-	print("\n-- Pawn Promotion --")
+	print("\n-- Pawn Promotion, Capture-Promotion & Move Notation --")
 	var rules := GameRules.new()
 	rules.pieces.clear()
 	rules._spawn_piece(PieceData.Team.CYAN, PieceData.Type.KING, GameRules.algebraic_to_axial("a1"))
@@ -142,6 +269,96 @@ func _test_pawn_promotion() -> void:
 	moves[0].promotion_type = PieceData.Type.QUEEN
 	rules.execute_move(moves[0])
 	_assert(pawn.type == PieceData.Type.QUEEN, "Executed promotion updates piece type to Queen")
+	_assert(
+		rules.move_history.back()["notation"] == "P f10->f11=Q  d(+0,-1)",
+		"Quiet Queen promotion formats as 'P f10->f11=Q  d(+0,-1)'"
+	)
+
+	# Capture-promotion onto top border: Cyan pawn at e10 (-1, -4) capturing Magenta Rook at f11 (0, -5)
+	var cap_rules := GameRules.new()
+	cap_rules.pieces.clear()
+	cap_rules._spawn_piece(PieceData.Team.CYAN, PieceData.Type.KING, GameRules.algebraic_to_axial("a1"))
+	cap_rules._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.KING, GameRules.algebraic_to_axial("l1"))
+	var cap_pawn := cap_rules._spawn_piece(PieceData.Team.CYAN, PieceData.Type.PAWN, GameRules.algebraic_to_axial("e10"))
+	var enemy_rook := cap_rules._spawn_piece(
+		PieceData.Team.MAGENTA,
+		PieceData.Type.ROOK,
+		GameRules.algebraic_to_axial("f11")
+	)
+
+	var cap_moves := cap_rules.get_legal_moves_for_piece(cap_pawn)
+	var cap_promo_mv: GameRules.VectorMove = null
+	var target_f11 := GameRules.algebraic_to_axial("f11")
+	for mv in cap_moves:
+		if mv.to == target_f11:
+			cap_promo_mv = mv
+			break
+
+	_assert(
+		cap_promo_mv != null and cap_promo_mv.is_capture and cap_promo_mv.is_promotion,
+		"Pawn capture e10xf11 onto promotion border sets both is_capture and is_promotion"
+	)
+
+	if cap_promo_mv != null:
+		var promo_cases := [
+			{"type": PieceData.Type.QUEEN, "code": "Q", "sides": 8},
+			{"type": PieceData.Type.ROOK, "code": "R", "sides": 6},
+			{"type": PieceData.Type.BISHOP, "code": "B", "sides": 4},
+			{"type": PieceData.Type.KNIGHT, "code": "N", "sides": 5},
+		]
+		for pc in promo_cases:
+			var p_type: PieceData.Type = pc["type"]
+			var p_code: String = pc["code"]
+			var p_sides: int = pc["sides"]
+			var mv_variant := cap_promo_mv.duplicate_move()
+			mv_variant.promotion_type = p_type
+			cap_rules.execute_move(mv_variant)
+
+			var promoted := cap_rules.get_piece_at(target_f11)
+			var expected_notation := "P e10xf11=%s  d(+1,-1)" % p_code
+			var actual_notation: String = cap_rules.move_history.back()["notation"]
+			_assert(
+				promoted != null
+				and promoted.type == p_type
+				and promoted.sides_count == p_sides
+				and cap_rules.get_piece_by_id(enemy_rook.id) == null
+				and actual_notation == expected_notation,
+				"Capture-promotion to %s updates type/sides, removes victim, and formats '%s'" % [
+					p_code,
+					expected_notation,
+				]
+			)
+			cap_rules.undo_last_move()
+			var restored_pawn := cap_rules.get_piece_at(GameRules.algebraic_to_axial("e10"))
+			var restored_rook := cap_rules.get_piece_at(target_f11)
+			_assert(
+				restored_pawn != null
+				and restored_pawn.type == PieceData.Type.PAWN
+				and restored_rook != null
+				and restored_rook.type == PieceData.Type.ROOK,
+				"Undo after =%s capture-promotion restores Cyan pawn on e10 and Magenta Rook on f11" % p_code
+			)
+
+	# Non-pawn capture notation check (e.g., Knight capture uses 'N' prefix and 'x' separator without suffix)
+	var knight_rules := GameRules.new()
+	knight_rules.pieces.clear()
+	knight_rules._spawn_piece(PieceData.Team.CYAN, PieceData.Type.KING, GameRules.algebraic_to_axial("a1"))
+	knight_rules._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.KING, GameRules.algebraic_to_axial("l1"))
+	var knight := knight_rules._spawn_piece(
+		PieceData.Team.CYAN,
+		PieceData.Type.KNIGHT,
+		GameRules.algebraic_to_axial("f6")
+	)
+	knight_rules._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.BISHOP, GameRules.algebraic_to_axial("g8"))
+	var target_g8 := GameRules.algebraic_to_axial("g8")
+	for mv in knight_rules.get_legal_moves_for_piece(knight):
+		if mv.to == target_g8:
+			knight_rules.execute_move(mv)
+			break
+	_assert(
+		knight_rules.move_history.back()["notation"] == "N f6xg8  d(+1,-3)",
+		"Non-pawn capture formats as 'N f6xg8  d(+1,-3)'"
+	)
 
 
 func _test_bishop_three_color_invariance() -> void:
@@ -163,7 +380,7 @@ func _test_bishop_three_color_invariance() -> void:
 
 
 func _test_check_checkmate_and_stalemate() -> void:
-	print("\n-- Check & Checkmate Detection --")
+	print("\n-- Check, Checkmate & Stalemate Detection --")
 	var rules := GameRules.new()
 	rules.pieces.clear()
 
@@ -187,6 +404,43 @@ func _test_check_checkmate_and_stalemate() -> void:
 		_assert(rules.is_king_in_check(PieceData.Team.MAGENTA), "Magenta King on f11 is in check")
 		_assert(rules.is_game_over, "Game is marked over on checkmate")
 		_assert(rules.status_text.begins_with("CHECKMATE"), "Status text reports CHECKMATE (%s)" % rules.status_text)
+
+	# Glinski Stalemate (0.75 : 0.25):
+	# Magenta King at f11 (0, -5) has 5 adjacent board cells: g10 (1,-5), g9 (1,-4), f10 (0,-4), e9 (-1,-3), e10 (-1,-4).
+	# Cyan Rook at e6 (-1, 0) covers file e (e9, e10) without checking f11.
+	# Cyan Queen moving g7 (1, -2) -> g8 (1, -3) covers g10, g9, f10, and e9 while offset (-1, -2) to f11 is a Knight jump!
+	var stale_rules := GameRules.new()
+	stale_rules.pieces.clear()
+	stale_rules._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.KING, GameRules.algebraic_to_axial("f11"))
+	stale_rules._spawn_piece(PieceData.Team.CYAN, PieceData.Type.KING, GameRules.algebraic_to_axial("f1"))
+	stale_rules._spawn_piece(PieceData.Team.CYAN, PieceData.Type.ROOK, GameRules.algebraic_to_axial("e6"))
+	var stale_queen := stale_rules._spawn_piece(
+		PieceData.Team.CYAN,
+		PieceData.Type.QUEEN,
+		GameRules.algebraic_to_axial("g7")
+	)
+
+	var stale_move: GameRules.VectorMove = null
+	var target_g8 := GameRules.algebraic_to_axial("g8")
+	for mv in stale_rules.get_legal_moves_for_piece(stale_queen):
+		if mv.to == target_g8:
+			stale_move = mv
+			break
+
+	_assert(stale_move != null, "Cyan Queen on g7 can move to g8 to deliver stalemate")
+	if stale_move != null:
+		stale_rules.execute_move(stale_move)
+		_assert(
+			not stale_rules.is_king_in_check(PieceData.Team.MAGENTA),
+			"Magenta King on f11 is NOT in check in stalemate position"
+		)
+		_assert(stale_rules.is_game_over, "Game is marked over on Glinski stalemate")
+		_assert(
+			stale_rules.status_text == "STALEMATE - Cyan 0.75 : 0.25 Magenta",
+			"Status text reports Glinski 0.75 : 0.25 stalemate (%s)" % stale_rules.status_text
+		)
+		stale_rules.undo_last_move()
+		_assert(not stale_rules.is_game_over, "Undoing stalemate move clears is_game_over")
 
 
 func _test_move_execution_and_undo() -> void:
@@ -386,6 +640,162 @@ func _test_ai_player_move_selection() -> void:
 	)
 
 
+func _test_ai_player_async_move_selection() -> void:
+	print("\n-- AIPlayer Async Time-Sliced Coroutine (choose_move_async) --")
+	var rules := GameRules.new()
+	var opening_moves := rules.get_all_legal_moves(PieceData.Team.CYAN)
+	var ai := AIPlayer.new()
+
+	var async_easy := await ai.choose_move_async(rules, PieceData.Team.CYAN, AIPlayer.Difficulty.EASY, self)
+	var async_med := await ai.choose_move_async(rules, PieceData.Team.CYAN, AIPlayer.Difficulty.MEDIUM, self)
+
+	var frame_counter := [0]
+	var on_frame := func() -> void:
+		frame_counter[0] += 1
+	process_frame.connect(on_frame)
+	var t0_usec := Time.get_ticks_usec()
+	var async_hard := await ai.choose_move_async(rules, PieceData.Team.CYAN, AIPlayer.Difficulty.HARD, self)
+	var hard_usec := Time.get_ticks_usec() - t0_usec
+	process_frame.disconnect(on_frame)
+	var frames_yielded: int = frame_counter[0]
+
+	_assert(
+		_is_move_in_list(async_easy, opening_moves),
+		"choose_move_async (Easy, active SceneTree) returns a valid legal opening move"
+	)
+	_assert(
+		_is_move_in_list(async_med, opening_moves),
+		"choose_move_async (Medium, active SceneTree) returns a valid legal opening move"
+	)
+	_assert(
+		_is_move_in_list(async_hard, opening_moves),
+		"choose_move_async (Hard, active SceneTree) returns a valid legal opening move (%d frame yields in %d ms)" % [
+			frames_yielded,
+			roundi(float(hard_usec) * 0.001),
+		]
+	)
+	_assert(
+		hard_usec < 2 * AIPlayer.ASYNC_FRAME_BUDGET_USEC or frames_yielded > 0,
+		"choose_move_async yields to SceneTree.process_frame when search exceeds ASYNC_FRAME_BUDGET_USEC (%d yields)" % frames_yielded
+	)
+	_assert(
+		rules.pieces.size() == 36
+		and rules.current_turn == PieceData.Team.CYAN
+		and _verify_spatial_index_invariants(rules),
+		"choose_move_async searches on an isolated clone without mutating source GameRules"
+	)
+
+	# Verify null-SceneTree synchronous fallback across Easy, Medium, and Hard on a compact tactical position
+	var compact := GameRules.new()
+	compact.pieces.clear()
+	compact._spawn_piece(PieceData.Team.CYAN, PieceData.Type.KING, GameRules.algebraic_to_axial("a1"))
+	compact._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.KING, GameRules.algebraic_to_axial("l1"))
+	compact._spawn_piece(PieceData.Team.CYAN, PieceData.Type.ROOK, GameRules.algebraic_to_axial("f4"))
+	compact._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.KNIGHT, GameRules.algebraic_to_axial("f8"))
+	var compact_legal := compact.get_all_legal_moves(PieceData.Team.CYAN)
+
+	var null_easy := await ai.choose_move_async(compact, PieceData.Team.CYAN, AIPlayer.Difficulty.EASY, null)
+	var null_med := await ai.choose_move_async(compact, PieceData.Team.CYAN, AIPlayer.Difficulty.MEDIUM, null)
+	var null_hard := await ai.choose_move_async(compact, PieceData.Team.CYAN, AIPlayer.Difficulty.HARD, null)
+	_assert(
+		_is_move_in_list(null_easy, compact_legal)
+		and _is_move_in_list(null_med, compact_legal)
+		and _is_move_in_list(null_hard, compact_legal),
+		"choose_move_async with null SceneTree falls back cleanly across Easy, Medium, and Hard"
+	)
+
+	# Verify 1-pawn capture-promotion expands into 2 [=Q, =N] candidates (bypassing legal_moves.size() == 1 fast path):
+	# Cyan King on f1 (0, 5) is immobilized by Magenta Rooks on e6/g6 and Bishop on d1, leaving e10xf11 as Cyan's sole raw move.
+	# Magenta King on a6 (-5, 0) is self-blocked except along the f11->a6 (-1, +1) ray, so e10xf11=Q# is mate in 1 (zero jitter).
+	var single_promo := GameRules.new()
+	single_promo.pieces.clear()
+	single_promo._spawn_piece(PieceData.Team.CYAN, PieceData.Type.KING, GameRules.algebraic_to_axial("f1"))
+	single_promo._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.ROOK, GameRules.algebraic_to_axial("e6"))
+	single_promo._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.ROOK, GameRules.algebraic_to_axial("g6"))
+	single_promo._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.BISHOP, GameRules.algebraic_to_axial("d1"))
+	single_promo._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.KING, Vector2i(-5, 0))
+	for blk in [Vector2i(-4, 0), Vector2i(-5, 1), Vector2i(-3, -1), Vector2i(-4, 1)]:
+		single_promo._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.PAWN, blk)
+	single_promo._spawn_piece(PieceData.Team.CYAN, PieceData.Type.PAWN, GameRules.algebraic_to_axial("e10"))
+	var promo_victim := single_promo._spawn_piece(
+		PieceData.Team.MAGENTA,
+		PieceData.Type.KNIGHT,
+		GameRules.algebraic_to_axial("f11")
+	)
+	var raw_promo_moves := single_promo.get_all_legal_moves(PieceData.Team.CYAN)
+	var promo_choice := await ai.choose_move_async(single_promo, PieceData.Team.CYAN, AIPlayer.Difficulty.HARD, self)
+	_assert(
+		raw_promo_moves.size() == 1
+		and _is_move_in_list(promo_choice, raw_promo_moves)
+		and promo_choice.is_capture
+		and promo_choice.captured_piece_id == promo_victim.id
+		and promo_choice.promotion_type == PieceData.Type.QUEEN,
+		"choose_move_async expands sole capture-promotion e10xf11 into [=Q, =N] and selects =Q"
+	)
+
+	# Verify _is_move_in_list rejects invalid promotion types (PAWN/KING) and mismatched capture metadata
+	var bad_promo_king := promo_choice.duplicate_move()
+	bad_promo_king.promotion_type = PieceData.Type.KING
+	var bad_promo_pawn := promo_choice.duplicate_move()
+	bad_promo_pawn.promotion_type = PieceData.Type.PAWN
+	var bad_capture_flag := promo_choice.duplicate_move()
+	bad_capture_flag.is_capture = false
+	_assert(
+		not _is_move_in_list(bad_promo_king, raw_promo_moves)
+		and not _is_move_in_list(bad_promo_pawn, raw_promo_moves)
+		and not _is_move_in_list(bad_capture_flag, raw_promo_moves),
+		"_is_move_in_list rejects invalid promotion types (KING/PAWN) and mismatched capture metadata"
+	)
+
+	# Verify async Knight underpromotion (=N) selection via smothered checkmate in 1:
+	# Magenta King at h8 (2, -4) is surrounded on all 11 in-bounds adjacent hexes by friendly Magenta pawns;
+	# f10->f11=N# delivers unblockable Knight checkmate via (+2, +1), whereas f10->f11=Q does not check h8.
+	var smothered_rules := GameRules.new()
+	smothered_rules.pieces.clear()
+	smothered_rules._spawn_piece(PieceData.Team.CYAN, PieceData.Type.KING, GameRules.algebraic_to_axial("a1"))
+	smothered_rules._spawn_piece(PieceData.Team.CYAN, PieceData.Type.PAWN, GameRules.algebraic_to_axial("f10"))
+	var m_king_pos := GameRules.algebraic_to_axial("h8")
+	smothered_rules._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.KING, m_king_pos)
+	for dir_vec in GameRules.ORTHO_DIRS + GameRules.DIAG_DIRS:
+		var adj: Vector2i = m_king_pos + dir_vec
+		if GameRules.is_inside_board(adj):
+			smothered_rules._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.PAWN, adj)
+
+	var smothered_legal := smothered_rules.get_all_legal_moves(PieceData.Team.CYAN)
+	var smothered_easy := await ai.choose_move_async(smothered_rules, PieceData.Team.CYAN, AIPlayer.Difficulty.EASY, self)
+	var smothered_hard := await ai.choose_move_async(smothered_rules, PieceData.Team.CYAN, AIPlayer.Difficulty.HARD, self)
+	_assert(
+		_is_move_in_list(smothered_easy, smothered_legal)
+		and smothered_easy.promotion_type == PieceData.Type.KNIGHT
+		and _is_move_in_list(smothered_hard, smothered_legal)
+		and smothered_hard.is_promotion
+		and smothered_hard.to == GameRules.algebraic_to_axial("f11")
+		and smothered_hard.promotion_type == PieceData.Type.KNIGHT,
+		"choose_move_async selects Knight underpromotion f10->f11=N# for smothered mate in 1"
+	)
+
+	# Verify single-legal-move fast path and game-over empty-move null return
+	var forced := GameRules.new()
+	forced.pieces.clear()
+	forced._spawn_piece(PieceData.Team.CYAN, PieceData.Type.KING, GameRules.algebraic_to_axial("f11"))
+	forced._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.KING, GameRules.algebraic_to_axial("f1"))
+	# Magenta Rook on e6 (-1, 0) covers e9, e10; Magenta Rook on g6 (1, -1) covers g9, g10; leaving only f10 (0, -4)
+	forced._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.ROOK, GameRules.algebraic_to_axial("e6"))
+	forced._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.ROOK, GameRules.algebraic_to_axial("g6"))
+	var forced_moves := forced.get_all_legal_moves(PieceData.Team.CYAN)
+	var forced_choice := await ai.choose_move_async(forced, PieceData.Team.CYAN, AIPlayer.Difficulty.HARD, self)
+	_assert(
+		forced_moves.size() == 1
+		and forced_choice != null
+		and forced_choice.to == GameRules.algebraic_to_axial("f10"),
+		"choose_move_async immediately returns the sole legal escape move when only 1 move exists"
+	)
+
+	forced.is_game_over = true
+	var over_choice := await ai.choose_move_async(forced, PieceData.Team.CYAN, AIPlayer.Difficulty.HARD, self)
+	_assert(over_choice == null, "choose_move_async returns null when no legal moves exist")
+
+
 func _test_software_renderer_detection() -> void:
 	print("\n-- Software Renderer Detection & Fallback --")
 	_assert(
@@ -560,10 +970,16 @@ func _test_mobile_scaling_and_responsive_layout() -> void:
 	)
 
 	# 3. Scene layout adaptation across Desktop, Mobile Portrait, and Mobile Landscape
+	# Adding main_ui to the initialized SceneTree.root triggers main.gd:_ready()
 	var main_ui: Control = MainScene.instantiate()
 	root.add_child(main_ui)
-	main_ui._resolve_nodes()
-	main_ui._setup_confirm_slider_theme()
+	_assert(
+		main_ui.split_container != null
+		and main_ui.confirm_slider != null
+		and main_ui.confirm_slider.has_theme_icon_override("grabber")
+		and main_ui.new_game_modal.visible,
+		"MainScene._ready() resolves UI nodes, configures ConfirmSlider theme, and opens NewGameModal on startup"
+	)
 
 	# Desktop Landscape (1280x800)
 	main_ui._apply_responsive_layout(Vector2(1280, 800), false)
@@ -604,8 +1020,7 @@ func _test_mobile_scaling_and_responsive_layout() -> void:
 		"Mobile Landscape 1040x480 layout narrows side panel to 248px, uses 4-col controls, 2-col promotion grid, 54x54 toggle button, and compacts NewGameModal height"
 	)
 
-	# 4. Slide-to-Unlock custom theme & idle animation behavior
-	main_ui.new_game_modal.visible = true
+	# 4. Slide-to-Unlock custom theme & idle animation behavior (NewGameModal opened by _ready())
 	var anim_before: float = main_ui._slider_anim_time
 	main_ui._process(0.05)
 	_assert(
