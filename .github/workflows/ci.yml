@@ -8,8 +8,6 @@ on:
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 env:
   GODOT_VERSION: "4.7.2"
@@ -66,7 +64,7 @@ jobs:
           mkdir -p ~/.cache/godot
           curl -fsSL "${GODOT_BASE_URL}/${GODOT_ZIP}" -o "/tmp/${GODOT_ZIP}"
           unzip -q "/tmp/${GODOT_ZIP}" -d ~/.cache/godot
-          mv ~/.cache/godot/Godot_v${{ env.GODOT_VERSION }}-${{ env.RELEASE_TYPE }}_linux.x86_64 ~/.cache/godot/godot
+          mv "$HOME/.cache/godot/Godot_v${GODOT_VERSION}-${RELEASE_TYPE}_linux.x86_64" ~/.cache/godot/godot
           chmod +x ~/.cache/godot/godot
           rm -f "/tmp/${GODOT_ZIP}"
 
@@ -89,15 +87,37 @@ jobs:
 
       - name: Import Project & Export Web Build
         shell: bash
+        env:
+          COMMIT_SHA: ${{ github.sha }}
         run: |
           mkdir -p "${BUILD_PATH}"
           godot --headless --import
           godot --headless --export-release "${EXPORT_PRESET}" "${BUILD_PATH}/index.html"
-          CACHE_BUST=$(echo "${GITHUB_SHA}" | cut -c1-7)
-          sed -i "s/index\\.js/index.js?v=${CACHE_BUST}/g; s/index\\.png/index.png?v=${CACHE_BUST}/g; s/index\\.icon\\.png/index.icon.png?v=${CACHE_BUST}/g; s/index\\.apple-touch-icon\\.png/index.apple-touch-icon.png?v=${CACHE_BUST}/g" "${BUILD_PATH}/index.html"
-          sed -i "s/fetch(file)/fetch(file + '?v=${CACHE_BUST}')/g; s/\\.audio\\.worklet\\.js/.audio.worklet.js?v=${CACHE_BUST}/g" "${BUILD_PATH}/index.js"
-          grep -q "index.js?v=${CACHE_BUST}" "${BUILD_PATH}/index.html"
-          grep -q "fetch(file + '?v=${CACHE_BUST}')" "${BUILD_PATH}/index.js"
+          CACHE_BUST="${COMMIT_SHA::7}"
+          if [[ ! "${CACHE_BUST}" =~ ^[0-9a-fA-F]{7}$ ]]; then
+            echo "::error::Invalid commit SHA '${COMMIT_SHA}'."
+            exit 1
+          fi
+          python3 - "${BUILD_PATH}" "${CACHE_BUST}" <<'PY'
+          import pathlib, sys
+
+          build_dir = pathlib.Path(sys.argv[1])
+          cache_bust = sys.argv[2]
+
+          html_path = build_dir / "index.html"
+          html = html_path.read_text(encoding="utf-8")
+          for asset in ("index.js", "index.png", "index.icon.png", "index.apple-touch-icon.png"):
+              html = html.replace(asset, f"{asset}?v={cache_bust}")
+          html_path.write_text(html, encoding="utf-8")
+
+          js_path = build_dir / "index.js"
+          js = js_path.read_text(encoding="utf-8")
+          js = js.replace("fetch(file)", f"fetch(file + '?v={cache_bust}')")
+          js = js.replace(".audio.worklet.js", f".audio.worklet.js?v={cache_bust}")
+          js_path.write_text(js, encoding="utf-8")
+          PY
+          grep -Fq "index.js?v=${CACHE_BUST}" "${BUILD_PATH}/index.html"
+          grep -Fq "fetch(file + '?v=${CACHE_BUST}')" "${BUILD_PATH}/index.js"
           test -f "${BUILD_PATH}/index.html"
           test -f "${BUILD_PATH}/index.wasm"
           test -f "${BUILD_PATH}/index.pck"
@@ -114,6 +134,9 @@ jobs:
     needs: build-web
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
     concurrency:
       group: "pages"
       cancel-in-progress: false

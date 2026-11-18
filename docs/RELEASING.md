@@ -27,7 +27,7 @@ This repository splits CI/CD into two focused workflows:
 > 2. **Dedicated unprivileged macOS user account** — Create a standard non-admin user (e.g. `ghrunner`) on the Mac Mini and install the GitHub Actions launch agent under that user.
 
 ### Runner Registration Steps (on macOS Host or Tart macOS VM)
-1. Install **Xcode** from the Mac App Store, then initialize CLI tools:
+1. Install **Xcode** (and optionally **Transporter** for `iTMSTransporter` uploads) from the Mac App Store, then initialize CLI tools:
    ```bash
    sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
    sudo xcodebuild -license accept
@@ -65,6 +65,7 @@ Export signing certificates as `.p12` files from Keychain Access and base64-enco
 | Type | Name | Description |
 | :--- | :--- | :--- |
 | Secret | `APPLE_TEAM_ID` | 10-character Apple Developer Team ID (e.g. `ABCDE12XYZ`) |
+| Variable / Secret | `APPLE_APP_ID` | *(Optional)* Numeric App Store Connect Apple ID (e.g. `1234567890`), used by `xcrun altool --upload-package` on hosted runners without `Transporter.app` |
 | Secret | `APPLE_MACOS_CERTIFICATE_BASE64` | Base64 `.p12` of **Developer ID Application** cert (for Steam macOS Gatekeeper) |
 | Secret | `APPLE_MACOS_CERTIFICATE_PASSWORD` | Password for the macOS `.p12` export |
 | Secret | `APPLE_IOS_CERTIFICATE_BASE64` | Base64 `.p12` of **Apple Distribution** cert (for iOS App Store) |
