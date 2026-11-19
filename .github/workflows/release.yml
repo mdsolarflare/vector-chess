@@ -27,6 +27,10 @@ on:
 permissions:
   contents: read
 
+defaults:
+  run:
+    shell: bash
+
 env:
   GODOT_VERSION: "4.7.2"
   RELEASE_TYPE: "stable"
@@ -34,18 +38,25 @@ env:
 
 jobs:
   # ---------------------------------------------------------------------------
-  # 1. Gate release on input validation, headless import & unit test suite
+  # 1. Gate release on centralized input validation, headless import & tests
   # ---------------------------------------------------------------------------
   test:
-    name: Run Unit Tests
+    name: Validate & Run Unit Tests
     runs-on: ubuntu-latest
-    container:
-      image: barichello/godot-ci:4.7.2
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      short_version: ${{ steps.meta.outputs.short_version }}
+      apple_build_version: ${{ steps.meta.outputs.apple_build_version }}
+      tag_name: ${{ steps.meta.outputs.tag_name }}
+      steam_branch: ${{ steps.meta.outputs.steam_branch }}
     steps:
       - name: Validate Release Inputs
+        id: meta
+        shell: bash
         env:
           RAW_VERSION: ${{ inputs.release_version }}
           SET_LIVE: ${{ inputs.steam_branch }}
+          RUN_NUMBER: ${{ github.run_number }}
         run: |
           VER="${RAW_VERSION#v}"
           if [[ ! "${VER}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
@@ -56,14 +67,46 @@ jobs:
             echo "::error::Invalid steam_branch '${SET_LIVE}'. Only alphanumeric characters and . _ / - are allowed."
             exit 1
           fi
+          if [[ ! "${RUN_NUMBER}" =~ ^[0-9]+$ ]]; then
+            echo "::error::Invalid GitHub run_number '${RUN_NUMBER}'."
+            exit 1
+          fi
+          SHORT_VER="${VER%%-*}"
+          {
+            echo "version=${VER}"
+            echo "short_version=${SHORT_VER}"
+            echo "apple_build_version=${RUN_NUMBER}"
+            echo "tag_name=v${VER}"
+            echo "steam_branch=${SET_LIVE}"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Checkout Repository
         uses: actions/checkout@v4
 
+      - name: Cache Godot Binary
+        id: godot-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/godot
+          key: godot-${{ env.GODOT_VERSION }}-${{ env.RELEASE_TYPE }}-linux-x86_64
+
+      - name: Install Godot Binary
+        if: steps.godot-cache.outputs.cache-hit != 'true'
+        env:
+          BASE_URL: "https://github.com/godotengine/godot/releases/download/${{ env.GODOT_VERSION }}-${{ env.RELEASE_TYPE }}"
+          ZIP_NAME: "Godot_v${{ env.GODOT_VERSION }}-${{ env.RELEASE_TYPE }}_linux.x86_64.zip"
+        run: |
+          mkdir -p ~/.cache/godot
+          curl -fsSL "${BASE_URL}/${ZIP_NAME}" -o "/tmp/${ZIP_NAME}"
+          unzip -q "/tmp/${ZIP_NAME}" -d ~/.cache/godot
+          mv "$HOME/.cache/godot/Godot_v${GODOT_VERSION}-${RELEASE_TYPE}_linux.x86_64" ~/.cache/godot/godot
+          chmod +x ~/.cache/godot/godot
+          rm -f "/tmp/${ZIP_NAME}"
+
       - name: Import & Run Tests
         run: |
-          godot --headless --import
-          godot --headless -s res://tests/test_rules.gd
+          "$HOME/.cache/godot/godot" --headless --import
+          "$HOME/.cache/godot/godot" --headless -s res://tests/test_rules.gd
 
   # ---------------------------------------------------------------------------
   # 2. Build Windows (Steam), Linux/Deck (Steam), and Android (.aab & .apk)
@@ -77,17 +120,10 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Stamp Release Version
-        id: version
         env:
-          RAW_VERSION: ${{ inputs.release_version }}
+          VERSION: ${{ needs.test.outputs.version }}
         run: |
-          VER="${RAW_VERSION#v}"
-          if [[ ! "${VER}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
-            echo "::error::Invalid release_version '${RAW_VERSION}'. Expected semantic version matching ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$."
-            exit 1
-          fi
-          echo "version=${VER}" >> "$GITHUB_OUTPUT"
-          python3 - "${VER}" <<'PY'
+          python3 - "${VERSION}" <<'PY'
           import pathlib, re, sys
 
           ver = sys.argv[1]
@@ -156,7 +192,7 @@ jobs:
 
       - name: Export Windows & Linux Depots
         env:
-          VERSION: ${{ steps.version.outputs.version }}
+          VERSION: ${{ needs.test.outputs.version }}
         run: |
           mkdir -p build/windows build/linux dist
           godot --headless --export-release "Windows Desktop" "build/windows/${EXPORT_NAME}.exe"
@@ -243,7 +279,7 @@ jobs:
 
       - name: Export Android Play Store (.aab) & Sideload (.apk)
         env:
-          VERSION: ${{ steps.version.outputs.version }}
+          VERSION: ${{ needs.test.outputs.version }}
         run: |
           mkdir -p build/android dist
           godot --headless --export-release "Android (Play Store)" "dist/${EXPORT_NAME}-v${VERSION}.aab"
@@ -253,13 +289,99 @@ jobs:
 
       - name: Upload to Google Play (Internal Track)
         if: inputs.upload_to_stores == true && steps.android-config.outputs.can_upload_play == 'true'
-        uses: r0adkll/upload-google-play@v1
-        with:
-          serviceAccountJsonPlainText: ${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}
-          packageName: com.vectorchess.game
-          releaseFiles: dist/${{ env.EXPORT_NAME }}-v${{ steps.version.outputs.version }}.aab
-          track: internal
-          status: draft
+        env:
+          VERSION: ${{ needs.test.outputs.version }}
+          GOOGLE_PLAY_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}
+        run: |
+          AAB_PATH="dist/${EXPORT_NAME}-v${VERSION}.aab"
+          python3 - "com.vectorchess.game" "${AAB_PATH}" <<'PY'
+          import base64, json, os, pathlib, subprocess, sys, tempfile, time, urllib.error, urllib.parse, urllib.request
+
+          package_name, aab_file = sys.argv[1], sys.argv[2]
+          sa = json.loads(os.environ["GOOGLE_PLAY_SERVICE_ACCOUNT_JSON"])
+          token_uri = sa.get("token_uri") or "https://oauth2.googleapis.com/token"
+          api_root = os.environ.get("GOOGLE_PLAY_API_ROOT") or "https://androidpublisher.googleapis.com"
+
+          def b64u(raw: bytes) -> str:
+              return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+
+          now = int(time.time())
+          header = b64u(json.dumps({"alg": "RS256", "typ": "JWT"}, separators=(",", ":")).encode("utf-8"))
+          claims = b64u(json.dumps({
+              "iss": sa["client_email"],
+              "scope": "https://www.googleapis.com/auth/androidpublisher",
+              "aud": token_uri,
+              "iat": now,
+              "exp": now + 3600,
+          }, separators=(",", ":")).encode("utf-8"))
+          signing_input = f"{header}.{claims}"
+
+          fd, key_path = tempfile.mkstemp(dir=os.environ.get("RUNNER_TEMP") or None, suffix=".pem")
+          try:
+              with os.fdopen(fd, "w", encoding="utf-8") as kf:
+                  kf.write(sa["private_key"])
+              sig = subprocess.run(
+                  ["openssl", "dgst", "-sha256", "-sign", key_path],
+                  input=signing_input.encode("ascii"),
+                  capture_output=True,
+                  check=True,
+              ).stdout
+          finally:
+              try:
+                  os.remove(key_path)
+              except OSError:
+                  pass
+
+          assertion = f"{signing_input}.{b64u(sig)}"
+          token_body = urllib.parse.urlencode({
+              "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
+              "assertion": assertion,
+          }).encode("utf-8")
+          token_req = urllib.request.Request(
+              token_uri,
+              data=token_body,
+              headers={"Content-Type": "application/x-www-form-urlencoded"},
+              method="POST",
+          )
+          try:
+              with urllib.request.urlopen(token_req, timeout=60) as resp:
+                  access_token = json.loads(resp.read().decode("utf-8"))["access_token"]
+          except urllib.error.HTTPError as exc:
+              detail = exc.read().decode("utf-8", errors="replace")
+              raise SystemExit(f"Google OAuth2 token exchange failed ({exc.code}): {detail}") from None
+
+          def api_request(url: str, method: str, data: bytes, content_type: str = "application/json") -> dict:
+              req = urllib.request.Request(
+                  url,
+                  data=data,
+                  headers={
+                      "Authorization": f"Bearer {access_token}",
+                      "Content-Type": content_type,
+                  },
+                  method=method,
+              )
+              try:
+                  with urllib.request.urlopen(req, timeout=300) as r:
+                      raw = r.read().decode("utf-8")
+                      return json.loads(raw) if raw else {}
+              except urllib.error.HTTPError as exc:
+                  detail = exc.read().decode("utf-8", errors="replace")
+                  raise SystemExit(f"Google Play API {method} {url} failed ({exc.code}): {detail}") from None
+
+          edits_base = f"{api_root}/androidpublisher/v3/applications/{package_name}/edits"
+          edit_id = api_request(edits_base, "POST", b"{}")["id"]
+          upload_url = f"{api_root}/upload/androidpublisher/v3/applications/{package_name}/edits/{edit_id}/bundles?uploadType=media"
+          bundle = api_request(upload_url, "POST", pathlib.Path(aab_file).read_bytes(), "application/octet-stream")
+          version_code = bundle["versionCode"]
+          track_payload = json.dumps({
+              "track": "internal",
+              "releases": [{"versionCodes": [str(version_code)], "status": "draft"}],
+          }).encode("utf-8")
+          api_request(f"{edits_base}/{edit_id}/tracks/internal", "PUT", track_payload)
+          api_request(f"{edits_base}/{edit_id}:commit", "POST", b"{}")
+          print(f"Uploaded {aab_file} (versionCode={version_code}) to Google Play internal track (draft).")
+          PY
+          echo '- Android `.aab`: Uploaded to **Google Play Internal Track** (`draft`).' >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload Steam Windows Depot Artifact
         uses: actions/upload-artifact@v4
@@ -295,20 +417,15 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Stamp Release Version
-        id: version
         env:
-          RAW_VERSION: ${{ inputs.release_version }}
+          VERSION: ${{ needs.test.outputs.version }}
+          SHORT_VERSION: ${{ needs.test.outputs.short_version }}
+          APPLE_BUILD_VERSION: ${{ needs.test.outputs.apple_build_version }}
         run: |
-          VER="${RAW_VERSION#v}"
-          if [[ ! "${VER}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
-            echo "::error::Invalid release_version '${RAW_VERSION}'. Expected semantic version matching ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$."
-            exit 1
-          fi
-          echo "version=${VER}" >> "$GITHUB_OUTPUT"
-          python3 - "${VER}" <<'PY'
+          python3 - "${VERSION}" "${SHORT_VERSION}" "${APPLE_BUILD_VERSION}" <<'PY'
           import pathlib, re, sys
 
-          ver = sys.argv[1]
+          ver, short_ver, build_ver = sys.argv[1:4]
 
           proj_path = pathlib.Path("project.godot")
           proj_text = proj_path.read_text(encoding="utf-8")
@@ -326,13 +443,13 @@ jobs:
           presets_text = presets_path.read_text(encoding="utf-8")
           presets_text, n_short = re.subn(
               r'^(application/short_version)=".*"$',
-              lambda m: f'{m.group(1)}="{ver}"',
+              lambda m: f'{m.group(1)}="{short_ver}"',
               presets_text,
               flags=re.MULTILINE,
           )
           presets_text, n_ver = re.subn(
               r'^(application/version)=".*"$',
-              lambda m: f'{m.group(1)}="{ver}"',
+              lambda m: f'{m.group(1)}="{build_ver}"',
               presets_text,
               flags=re.MULTILINE,
           )
@@ -386,7 +503,7 @@ jobs:
 
       - name: Export, Sign & Notarize macOS Universal App (Steam)
         env:
-          VERSION: ${{ steps.version.outputs.version }}
+          VERSION: ${{ needs.test.outputs.version }}
           APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_MACOS_CERTIFICATE_BASE64 || secrets.APPLE_CERTIFICATE_BASE64 }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_MACOS_CERTIFICATE_PASSWORD || secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_MACOS_SIGNING_IDENTITY }}
@@ -402,7 +519,8 @@ jobs:
           if [ -n "${APPLE_CERTIFICATE_BASE64}" ]; then
             KEYCHAIN_PATH="$RUNNER_TEMP/build-macos.keychain-db"
             KEYCHAIN_PASS=$(uuidgen)
-            trap 'rm -rf "$RUNNER_TEMP/macos_cert.p12" "$RUNNER_TEMP/private_keys"; security delete-keychain "${KEYCHAIN_PATH}" 2>/dev/null || true' EXIT
+            NOTARIZE_ZIP="$RUNNER_TEMP/${EXPORT_NAME}-notarize.zip"
+            trap 'rm -rf "$RUNNER_TEMP/macos_cert.p12" "$RUNNER_TEMP/private_keys" "${NOTARIZE_ZIP}"; security delete-keychain "${KEYCHAIN_PATH}" 2>/dev/null || true' EXIT
             echo "${APPLE_CERTIFICATE_BASE64}" | base64 --decode > "$RUNNER_TEMP/macos_cert.p12"
 
             security create-keychain -p "${KEYCHAIN_PASS}" "${KEYCHAIN_PATH}"
@@ -424,13 +542,13 @@ jobs:
               KEY_FILE="$RUNNER_TEMP/private_keys/AuthKey_${APPLE_API_KEY_ID}.p8"
               printf "%s\n" "${APPLE_API_PRIVATE_KEY}" > "${KEY_FILE}"
               chmod 600 "${KEY_FILE}"
-              ditto -c -k --keepParent "build/macos/${EXPORT_NAME}.app" "$RUNNER_TEMP/${EXPORT_NAME}-notarize.zip"
-              xcrun notarytool submit "$RUNNER_TEMP/${EXPORT_NAME}-notarize.zip" \
+              ditto -c -k --keepParent "build/macos/${EXPORT_NAME}.app" "${NOTARIZE_ZIP}"
+              xcrun notarytool submit "${NOTARIZE_ZIP}" \
                 --key "${KEY_FILE}" \
                 --key-id "${APPLE_API_KEY_ID}" \
                 --issuer "${APPLE_API_ISSUER_ID}" \
                 --wait
-              rm -f "${KEY_FILE}"
+              rm -f "${KEY_FILE}" "${NOTARIZE_ZIP}"
               xcrun stapler staple "build/macos/${EXPORT_NAME}.app"
               echo '- macOS `.app`: Signed with **Developer ID** and **Notarized**.' >> "$GITHUB_STEP_SUMMARY"
             else
@@ -449,7 +567,9 @@ jobs:
 
       - name: Export iOS (.ipa or Xcode Project)
         env:
-          VERSION: ${{ steps.version.outputs.version }}
+          VERSION: ${{ needs.test.outputs.version }}
+          SHORT_VERSION: ${{ needs.test.outputs.short_version }}
+          APPLE_BUILD_VERSION: ${{ needs.test.outputs.apple_build_version }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           APPLE_APP_ID: ${{ secrets.APPLE_APP_ID || vars.APPLE_APP_ID }}
           APPLE_IOS_CERT_BASE64: ${{ secrets.APPLE_IOS_CERTIFICATE_BASE64 || secrets.APPLE_CERTIFICATE_BASE64 }}
@@ -471,7 +591,7 @@ jobs:
             KEYCHAIN_PATH="$RUNNER_TEMP/build-ios.keychain-db"
             KEYCHAIN_PASS=$(uuidgen)
             INSTALLED_PROFILE=""
-            trap 'rm -rf "$RUNNER_TEMP/ios_cert.p12" "$RUNNER_TEMP/profile.mobileprovision" "$RUNNER_TEMP/profile.plist" "$RUNNER_TEMP/private_keys" ./private_keys "${INSTALLED_PROFILE}"; security delete-keychain "${KEYCHAIN_PATH}" 2>/dev/null || true' EXIT
+            trap 'rm -rf "$RUNNER_TEMP/ios_cert.p12" "$RUNNER_TEMP/profile.mobileprovision" "$RUNNER_TEMP/profile.plist" "$RUNNER_TEMP/private_keys" ${INSTALLED_PROFILE:+"${INSTALLED_PROFILE}"}; security delete-keychain "${KEYCHAIN_PATH}" 2>/dev/null || true' EXIT
             echo "${APPLE_IOS_CERT_BASE64}" | base64 --decode > "$RUNNER_TEMP/ios_cert.p12"
             echo "${APPLE_PROVISION_BASE64}" | base64 --decode > "$RUNNER_TEMP/profile.mobileprovision"
 
@@ -513,38 +633,77 @@ jobs:
                 echo "::error::Invalid APPLE_API_KEY_ID format."
                 exit 1
               fi
-              mkdir -p "$RUNNER_TEMP/private_keys" ./private_keys
+              mkdir -p "$RUNNER_TEMP/private_keys"
               printf "%s\n" "${APPLE_API_PRIVATE_KEY}" > "$RUNNER_TEMP/private_keys/AuthKey_${APPLE_API_KEY_ID}.p8"
               chmod 600 "$RUNNER_TEMP/private_keys/AuthKey_${APPLE_API_KEY_ID}.p8"
-              cp "$RUNNER_TEMP/private_keys/AuthKey_${APPLE_API_KEY_ID}.p8" "./private_keys/AuthKey_${APPLE_API_KEY_ID}.p8"
-              chmod 600 "./private_keys/AuthKey_${APPLE_API_KEY_ID}.p8"
               export API_PRIVATE_KEYS_DIR="$RUNNER_TEMP/private_keys"
 
+              TRANSPORTER_BIN=""
               if [ -x "/Applications/Transporter.app/Contents/itms/bin/iTMSTransporter" ]; then
-                "/Applications/Transporter.app/Contents/itms/bin/iTMSTransporter" -m upload \
+                TRANSPORTER_BIN="/Applications/Transporter.app/Contents/itms/bin/iTMSTransporter"
+              elif [ -x "/usr/local/itms/bin/iTMSTransporter" ]; then
+                TRANSPORTER_BIN="/usr/local/itms/bin/iTMSTransporter"
+              fi
+
+              if [ -n "${TRANSPORTER_BIN}" ]; then
+                "${TRANSPORTER_BIN}" -m upload \
                   -assetFile "${IPA_PATH}" \
                   -apiKey "${APPLE_API_KEY_ID}" \
                   -apiIssuer "${APPLE_API_ISSUER_ID}"
-              elif [ -n "${APPLE_APP_ID}" ]; then
-                if [[ ! "${APPLE_APP_ID}" =~ ^[0-9]+$ ]]; then
-                  echo "::error::Invalid APPLE_APP_ID '${APPLE_APP_ID}'. Expected numeric App Store Connect Apple ID."
+              else
+                RESOLVED_APP_ID="${APPLE_APP_ID}"
+                if [ -z "${RESOLVED_APP_ID}" ]; then
+                  APPS_JSON=$(xcrun altool --list-apps \
+                    --apiKey "${APPLE_API_KEY_ID}" \
+                    --apiIssuer "${APPLE_API_ISSUER_ID}" \
+                    --output-format json 2>/dev/null || true)
+                  if [ -n "${APPS_JSON}" ]; then
+                    RESOLVED_APP_ID=$(APPS_JSON="${APPS_JSON}" python3 -c '
+          import json, os
+          target = "com.vectorchess.game"
+          def is_num_id(val):
+              return isinstance(val, (int, str)) and not isinstance(val, bool) and str(val).isdigit()
+          def search(node):
+              if isinstance(node, dict):
+                  bid = node.get("bundleId") or node.get("bundle-id") or (node.get("attributes") or {}).get("bundleId")
+                  aid = node.get("id") or node.get("appleId") or node.get("apple-id")
+                  if bid == target and is_num_id(aid):
+                      return str(aid)
+                  for k, v in node.items():
+                      if k == target and is_num_id(v):
+                          return str(v)
+                      if v == target and is_num_id(k):
+                          return str(k)
+                      res = search(v)
+                      if res:
+                          return res
+              elif isinstance(node, list):
+                  for item in node:
+                      res = search(item)
+                      if res:
+                          return res
+              return ""
+          try:
+              print(search(json.loads(os.environ["APPS_JSON"])))
+          except Exception:
+              print("")
+          ')
+                  fi
+                fi
+                if [[ ! "${RESOLVED_APP_ID}" =~ ^[0-9]+$ ]]; then
+                  echo "::error::Transporter.app is not installed on this runner and numeric APPLE_APP_ID could not be resolved for com.vectorchess.game. Configure the APPLE_APP_ID variable/secret (numeric Apple ID from App Store Connect -> App Information) or install Transporter.app."
                   exit 1
                 fi
                 xcrun altool --upload-package "${IPA_PATH}" \
-                  --type ios \
-                  --apple-id "${APPLE_APP_ID}" \
+                  -t ios \
+                  --apple-id "${RESOLVED_APP_ID}" \
                   --bundle-id "com.vectorchess.game" \
-                  --bundle-short-version-string "${VERSION}" \
-                  --bundle-version "${VERSION}" \
+                  --bundle-short-version-string "${SHORT_VERSION}" \
+                  --bundle-version "${APPLE_BUILD_VERSION}" \
                   --apiKey "${APPLE_API_KEY_ID}" \
                   --apiIssuer "${APPLE_API_ISSUER_ID}"
-              else
-                xcrun iTMSTransporter -m upload \
-                  -assetFile "${IPA_PATH}" \
-                  -apiKey "${APPLE_API_KEY_ID}" \
-                  -apiIssuer "${APPLE_API_ISSUER_ID}"
               fi
-              rm -rf "$RUNNER_TEMP/private_keys" ./private_keys
+              rm -rf "$RUNNER_TEMP/private_keys"
               echo '- iOS `.ipa`: Uploaded to **App Store Connect / TestFlight**.' >> "$GITHUB_STEP_SUMMARY"
             fi
 
@@ -554,8 +713,13 @@ jobs:
           import pathlib
           p = pathlib.Path("export_presets.cfg")
           s = p.read_text(encoding="utf-8")
-          s = s.replace("application/app_store_team_id=\"\"", "application/app_store_team_id=\"0000000000\"")
-          s = s.replace("application/export_project_only=false", "application/export_project_only=true")
+          for old, new in (
+              ("application/app_store_team_id=\"\"", "application/app_store_team_id=\"0000000000\""),
+              ("application/export_project_only=false", "application/export_project_only=true"),
+          ):
+              if old not in s:
+                  raise SystemExit(f"Failed to find {old} in export_presets.cfg")
+              s = s.replace(old, new)
           p.write_text(s, encoding="utf-8")
           '
             "${GODOT_BIN}" --headless --export-release "iOS" "build/ios/${EXPORT_NAME}.ipa"
@@ -583,7 +747,7 @@ jobs:
   # ---------------------------------------------------------------------------
   deploy-steam:
     name: Deploy to SteamPipe
-    needs: [build-desktop-android, build-apple]
+    needs: [test, build-desktop-android, build-apple]
     if: inputs.upload_to_stores == true && vars.STEAM_APP_ID != ''
     runs-on: ubuntu-latest
     steps:
@@ -614,31 +778,23 @@ jobs:
           DEPOT_WIN: ${{ vars.STEAM_DEPOT_WINDOWS }}
           DEPOT_LIN: ${{ vars.STEAM_DEPOT_LINUX }}
           DEPOT_MAC: ${{ vars.STEAM_DEPOT_MACOS }}
-          SET_LIVE: ${{ inputs.steam_branch }}
-          RAW_VERSION: ${{ inputs.release_version }}
+          SET_LIVE: ${{ needs.test.outputs.steam_branch }}
+          VERSION: ${{ needs.test.outputs.version }}
           COMMIT_SHA: ${{ github.sha }}
         run: |
           mkdir -p build steam/output
           tar -xf /tmp/steam-linux/steam-linux.tar -C build
           tar -xf /tmp/steam-macos/steam-macos.tar -C build
 
-          VER="${RAW_VERSION#v}"
-          if [[ ! "${VER}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
-            echo "::error::Invalid release_version '${RAW_VERSION}'. Expected semantic version matching ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$."
-            exit 1
-          fi
-          if [[ ! "${SET_LIVE}" =~ ^[0-9A-Za-z._/-]*$ ]]; then
-            echo "::error::Invalid steam_branch '${SET_LIVE}'. Only alphanumeric characters and . _ / - are allowed."
-            exit 1
-          fi
-          for ID_VAR in "${STEAM_APP_ID}" "${DEPOT_WIN}" "${DEPOT_LIN}" "${DEPOT_MAC}"; do
-            if [ -n "${ID_VAR}" ] && [[ ! "${ID_VAR}" =~ ^[0-9]+$ ]]; then
-              echo "::error::Steam App/Depot IDs must be numeric (got '${ID_VAR}')."
+          for VAR_NAME in STEAM_APP_ID DEPOT_WIN DEPOT_LIN DEPOT_MAC; do
+            VAL="${!VAR_NAME}"
+            if [[ ! "${VAL}" =~ ^[0-9]+$ ]]; then
+              echo "::error::Required Steam variable ${VAR_NAME} must be a non-empty numeric ID (got '${VAL}')."
               exit 1
             fi
           done
 
-          DESC="Vector Chess v${VER} (${COMMIT_SHA::7})"
+          DESC="Vector Chess v${VERSION} (${COMMIT_SHA::7})"
           python3 - "${STEAM_APP_ID}" "${DEPOT_WIN}" "${DEPOT_LIN}" "${DEPOT_MAC}" "${DESC}" "${SET_LIVE}" <<'PY'
           import pathlib, sys
 
@@ -664,7 +820,7 @@ jobs:
               vdf_path.write_text(content, encoding="utf-8")
           PY
 
-      - name: Upload Build via SteamCMD Container
+      - name: Upload Build via Valve SteamCMD
         env:
           STEAM_USERNAME: ${{ secrets.STEAM_USERNAME }}
           STEAM_CONFIG_VDF: ${{ secrets.STEAM_CONFIG_VDF }}
@@ -673,14 +829,20 @@ jobs:
             echo "::warning::STEAM_USERNAME or STEAM_CONFIG_VDF secret not set; skipping SteamPipe upload."
             exit 0
           fi
-          mkdir -p "$RUNNER_TEMP/steam-config"
-          echo "${STEAM_CONFIG_VDF}" | base64 --decode > "$RUNNER_TEMP/steam-config/config.vdf"
-          docker run --rm \
-            -v "$(pwd):/workspace" \
-            -v "$RUNNER_TEMP/steam-config:/root/Steam/config" \
-            steamcmd/steamcmd:latest \
+          STEAM_DIR="$RUNNER_TEMP/steamcmd"
+          trap 'rm -rf "${STEAM_DIR}" "$HOME/Steam/config/config.vdf" "$HOME/.steam"' EXIT
+          sudo dpkg --add-architecture i386
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq lib32gcc-s1 >/dev/null
+          mkdir -p "${STEAM_DIR}/config" "$HOME/Steam/config"
+          curl -fsSL "https://steamcdn-a.akamaihd.net/client/installer/steamcmd_linux.tar.gz" | tar -xz -C "${STEAM_DIR}"
+          echo "${STEAM_CONFIG_VDF}" | base64 --decode > "${STEAM_DIR}/config/config.vdf"
+          chmod 600 "${STEAM_DIR}/config/config.vdf"
+          cp "${STEAM_DIR}/config/config.vdf" "$HOME/Steam/config/config.vdf"
+          chmod 600 "$HOME/Steam/config/config.vdf"
+          "${STEAM_DIR}/steamcmd.sh" \
             +login "${STEAM_USERNAME}" \
-            +run_app_build /workspace/steam/app_build.vdf \
+            +run_app_build "${GITHUB_WORKSPACE}/steam/app_build.vdf" \
             +quit
 
   # ---------------------------------------------------------------------------
@@ -688,25 +850,12 @@ jobs:
   # ---------------------------------------------------------------------------
   github-release:
     name: Publish GitHub Release
-    needs: [build-desktop-android, build-apple]
+    needs: [test, build-desktop-android, build-apple]
     if: inputs.create_github_release == true
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - name: Normalize Tag Name
-        id: tag
-        env:
-          RAW_VERSION: ${{ inputs.release_version }}
-        run: |
-          VER="${RAW_VERSION#v}"
-          if [[ ! "${VER}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
-            echo "::error::Invalid release_version '${RAW_VERSION}'. Expected semantic version matching ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$."
-            exit 1
-          fi
-          echo "tag_name=v${VER}" >> "$GITHUB_OUTPUT"
-          echo "version=${VER}" >> "$GITHUB_OUTPUT"
-
       - name: Download Desktop & Android Packages
         uses: actions/download-artifact@v4
         with:
@@ -720,10 +869,19 @@ jobs:
           path: release-assets
 
       - name: Create Tag & GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ steps.tag.outputs.tag_name }}
-          target_commitish: ${{ github.sha }}
-          name: Vector Chess ${{ steps.tag.outputs.tag_name }}
-          files: release-assets/*
-          generate_release_notes: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ needs.test.outputs.tag_name }}
+          TARGET_SHA: ${{ github.sha }}
+        run: |
+          if gh release view "${TAG_NAME}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release upload "${TAG_NAME}" release-assets/* \
+              --repo "${GITHUB_REPOSITORY}" \
+              --clobber
+          else
+            gh release create "${TAG_NAME}" release-assets/* \
+              --repo "${GITHUB_REPOSITORY}" \
+              --target "${TARGET_SHA}" \
+              --title "Vector Chess ${TAG_NAME}" \
+              --generate-notes
+          fi
