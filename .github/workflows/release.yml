@@ -46,7 +46,7 @@ jobs:
     outputs:
       version: ${{ steps.meta.outputs.version }}
       short_version: ${{ steps.meta.outputs.short_version }}
-      apple_build_version: ${{ steps.meta.outputs.apple_build_version }}
+      build_version: ${{ steps.meta.outputs.build_version }}
       tag_name: ${{ steps.meta.outputs.tag_name }}
       steam_branch: ${{ steps.meta.outputs.steam_branch }}
     steps:
@@ -67,7 +67,7 @@ jobs:
             echo "::error::Invalid steam_branch '${SET_LIVE}'. Only alphanumeric characters and . _ / - are allowed."
             exit 1
           fi
-          if [[ ! "${RUN_NUMBER}" =~ ^[0-9]+$ ]]; then
+          if [[ ! "${RUN_NUMBER}" =~ ^[1-9][0-9]*$ ]]; then
             echo "::error::Invalid GitHub run_number '${RUN_NUMBER}'."
             exit 1
           fi
@@ -75,7 +75,7 @@ jobs:
           {
             echo "version=${VER}"
             echo "short_version=${SHORT_VER}"
-            echo "apple_build_version=${RUN_NUMBER}"
+            echo "build_version=${RUN_NUMBER}"
             echo "tag_name=v${VER}"
             echo "steam_branch=${SET_LIVE}"
           } >> "$GITHUB_OUTPUT"
@@ -122,22 +122,41 @@ jobs:
       - name: Stamp Release Version
         env:
           VERSION: ${{ needs.test.outputs.version }}
+          BUILD_VERSION: ${{ needs.test.outputs.build_version }}
         run: |
-          python3 - "${VERSION}" <<'PY'
+          python3 - "${VERSION}" "${BUILD_VERSION}" <<'PY'
           import pathlib, re, sys
 
-          ver = sys.argv[1]
-          path = pathlib.Path("project.godot")
-          text = path.read_text(encoding="utf-8")
-          updated, count = re.subn(
+          ver, build_ver = sys.argv[1:3]
+          proj_path = pathlib.Path("project.godot")
+          proj_text = proj_path.read_text(encoding="utf-8")
+          proj_text, n_proj = re.subn(
               r'^config/version=".*"$',
               lambda _: f'config/version="{ver}"',
-              text,
+              proj_text,
               flags=re.MULTILINE,
           )
-          if count == 0:
+          if n_proj == 0:
               raise SystemExit("Failed to find config/version in project.godot")
-          path.write_text(updated, encoding="utf-8")
+          proj_path.write_text(proj_text, encoding="utf-8")
+
+          presets_path = pathlib.Path("export_presets.cfg")
+          presets_text = presets_path.read_text(encoding="utf-8")
+          presets_text, n_code = re.subn(
+              r'^(version/code)=[0-9]+$',
+              lambda m: f'{m.group(1)}={build_ver}',
+              presets_text,
+              flags=re.MULTILINE,
+          )
+          presets_text, n_name = re.subn(
+              r'^(version/name)=".*"$',
+              lambda m: f'{m.group(1)}="{ver}"',
+              presets_text,
+              flags=re.MULTILINE,
+          )
+          if n_code < 2 or n_name < 2:
+              raise SystemExit("Failed to update Android version/code and version/name in export_presets.cfg")
+          presets_path.write_text(presets_text, encoding="utf-8")
           PY
 
       - name: Setup Java 17 (Required for Godot 4.7 Android Gradle Builds)
@@ -350,14 +369,16 @@ jobs:
               detail = exc.read().decode("utf-8", errors="replace")
               raise SystemExit(f"Google OAuth2 token exchange failed ({exc.code}): {detail}") from None
 
-          def api_request(url: str, method: str, data: bytes, content_type: str = "application/json") -> dict:
+          def api_request(url: str, method: str, data: bytes = b"", content_type: str | None = "application/json") -> dict:
+              headers = {"Authorization": f"Bearer {access_token}"}
+              if content_type is not None:
+                  headers["Content-Type"] = content_type
+              if not data:
+                  headers["Content-Length"] = "0"
               req = urllib.request.Request(
                   url,
-                  data=data,
-                  headers={
-                      "Authorization": f"Bearer {access_token}",
-                      "Content-Type": content_type,
-                  },
+                  data=data if data else None,
+                  headers=headers,
                   method=method,
               )
               try:
@@ -378,7 +399,7 @@ jobs:
               "releases": [{"versionCodes": [str(version_code)], "status": "draft"}],
           }).encode("utf-8")
           api_request(f"{edits_base}/{edit_id}/tracks/internal", "PUT", track_payload)
-          api_request(f"{edits_base}/{edit_id}:commit", "POST", b"{}")
+          api_request(f"{edits_base}/{edit_id}:commit", "POST", b"", None)
           print(f"Uploaded {aab_file} (versionCode={version_code}) to Google Play internal track (draft).")
           PY
           echo '- Android `.aab`: Uploaded to **Google Play Internal Track** (`draft`).' >> "$GITHUB_STEP_SUMMARY"
@@ -420,9 +441,9 @@ jobs:
         env:
           VERSION: ${{ needs.test.outputs.version }}
           SHORT_VERSION: ${{ needs.test.outputs.short_version }}
-          APPLE_BUILD_VERSION: ${{ needs.test.outputs.apple_build_version }}
+          BUILD_VERSION: ${{ needs.test.outputs.build_version }}
         run: |
-          python3 - "${VERSION}" "${SHORT_VERSION}" "${APPLE_BUILD_VERSION}" <<'PY'
+          python3 - "${VERSION}" "${SHORT_VERSION}" "${BUILD_VERSION}" <<'PY'
           import pathlib, re, sys
 
           ver, short_ver, build_ver = sys.argv[1:4]
@@ -569,7 +590,7 @@ jobs:
         env:
           VERSION: ${{ needs.test.outputs.version }}
           SHORT_VERSION: ${{ needs.test.outputs.short_version }}
-          APPLE_BUILD_VERSION: ${{ needs.test.outputs.apple_build_version }}
+          BUILD_VERSION: ${{ needs.test.outputs.build_version }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           APPLE_APP_ID: ${{ secrets.APPLE_APP_ID || vars.APPLE_APP_ID }}
           APPLE_IOS_CERT_BASE64: ${{ secrets.APPLE_IOS_CERTIFICATE_BASE64 || secrets.APPLE_CERTIFICATE_BASE64 }}
@@ -659,19 +680,35 @@ jobs:
                     --output-format json 2>/dev/null || true)
                   if [ -n "${APPS_JSON}" ]; then
                     RESOLVED_APP_ID=$(APPS_JSON="${APPS_JSON}" python3 -c '
-          import json, os
+          import json, os, re
           target = "com.vectorchess.game"
+          BUNDLE_KEYS = {"bundleid", "bundleidentifier", "cfbundleidentifier"}
+          APP_ID_KEYS = {"id", "appleid", "adamid", "itemid", "appadamid"}
+          def norm(key):
+              return re.sub(r"[^a-z0-9]", "", str(key).lower())
           def is_num_id(val):
               return isinstance(val, (int, str)) and not isinstance(val, bool) and str(val).isdigit()
+          def pick(mapping, allowed):
+              if not isinstance(mapping, dict):
+                  return None
+              for mk, mv in mapping.items():
+                  if norm(mk) in allowed and mv is not None and mv != "":
+                      return mv
+              return None
           def search(node):
               if isinstance(node, dict):
-                  bid = node.get("bundleId") or node.get("bundle-id") or (node.get("attributes") or {}).get("bundleId")
-                  aid = node.get("id") or node.get("appleId") or node.get("apple-id")
+                  attrs = node.get("attributes") if isinstance(node.get("attributes"), dict) else None
+                  bid = pick(node, BUNDLE_KEYS) or pick(attrs, BUNDLE_KEYS)
+                  aid = pick(node, APP_ID_KEYS) or pick(attrs, APP_ID_KEYS)
                   if bid == target and is_num_id(aid):
                       return str(aid)
                   for k, v in node.items():
-                      if k == target and is_num_id(v):
-                          return str(v)
+                      if k == target:
+                          if is_num_id(v):
+                              return str(v)
+                          nested_aid = pick(v, APP_ID_KEYS)
+                          if is_num_id(nested_aid):
+                              return str(nested_aid)
                       if v == target and is_num_id(k):
                           return str(k)
                       res = search(v)
@@ -699,7 +736,7 @@ jobs:
                   --apple-id "${RESOLVED_APP_ID}" \
                   --bundle-id "com.vectorchess.game" \
                   --bundle-short-version-string "${SHORT_VERSION}" \
-                  --bundle-version "${APPLE_BUILD_VERSION}" \
+                  --bundle-version "${BUILD_VERSION}" \
                   --apiKey "${APPLE_API_KEY_ID}" \
                   --apiIssuer "${APPLE_API_ISSUER_ID}"
               fi
@@ -830,20 +867,24 @@ jobs:
             exit 0
           fi
           STEAM_DIR="$RUNNER_TEMP/steamcmd"
-          trap 'rm -rf "${STEAM_DIR}" "$HOME/Steam/config/config.vdf" "$HOME/.steam"' EXIT
+          trap 'rm -rf "${STEAM_DIR}" "$HOME/Steam" "$HOME/.local/share/Steam" "$HOME/.steam"' EXIT
           sudo dpkg --add-architecture i386
           sudo apt-get update -qq
           sudo apt-get install -y -qq lib32gcc-s1 >/dev/null
-          mkdir -p "${STEAM_DIR}/config" "$HOME/Steam/config"
+          mkdir -p "${STEAM_DIR}/config" "$HOME/Steam/config" "$HOME/.local/share/Steam/config"
           curl -fsSL "https://steamcdn-a.akamaihd.net/client/installer/steamcmd_linux.tar.gz" | tar -xz -C "${STEAM_DIR}"
           echo "${STEAM_CONFIG_VDF}" | base64 --decode > "${STEAM_DIR}/config/config.vdf"
           chmod 600 "${STEAM_DIR}/config/config.vdf"
           cp "${STEAM_DIR}/config/config.vdf" "$HOME/Steam/config/config.vdf"
           chmod 600 "$HOME/Steam/config/config.vdf"
+          cp "${STEAM_DIR}/config/config.vdf" "$HOME/.local/share/Steam/config/config.vdf"
+          chmod 600 "$HOME/.local/share/Steam/config/config.vdf"
           "${STEAM_DIR}/steamcmd.sh" \
+            +@ShutdownOnFailedCommand 1 \
+            +@NoPromptForPassword 1 \
             +login "${STEAM_USERNAME}" \
             +run_app_build "${GITHUB_WORKSPACE}/steam/app_build.vdf" \
-            +quit
+            +quit < /dev/null
 
   # ---------------------------------------------------------------------------
   # 5. Tag & Publish GitHub Release with all downloadable store packages
@@ -879,9 +920,14 @@ jobs:
               --repo "${GITHUB_REPOSITORY}" \
               --clobber
           else
+            PRERELEASE_ARGS=()
+            if [[ "${TAG_NAME}" == *-* ]]; then
+              PRERELEASE_ARGS=(--prerelease)
+            fi
             gh release create "${TAG_NAME}" release-assets/* \
               --repo "${GITHUB_REPOSITORY}" \
               --target "${TARGET_SHA}" \
               --title "Vector Chess ${TAG_NAME}" \
-              --generate-notes
+              --generate-notes \
+              ${PRERELEASE_ARGS[@]+"${PRERELEASE_ARGS[@]}"}
           fi
