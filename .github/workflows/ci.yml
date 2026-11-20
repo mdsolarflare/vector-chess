@@ -41,11 +41,11 @@ jobs:
           GODOT_ZIP: "Godot_v${{ env.GODOT_VERSION }}-${{ env.RELEASE_TYPE }}_linux.x86_64.zip"
         run: |
           mkdir -p ~/.cache/godot
-          curl -fsSL "${GODOT_BASE_URL}/${GODOT_ZIP}" -o "/tmp/${GODOT_ZIP}"
-          unzip -q "/tmp/${GODOT_ZIP}" -d ~/.cache/godot
-          mv "$HOME/.cache/godot/Godot_v${GODOT_VERSION}-${RELEASE_TYPE}_linux.x86_64" ~/.cache/godot/godot
+          curl -fsSL "${GODOT_BASE_URL}/${GODOT_ZIP}" -o "$RUNNER_TEMP/${GODOT_ZIP}"
+          unzip -q -o "$RUNNER_TEMP/${GODOT_ZIP}" -d ~/.cache/godot
+          mv -f "$HOME/.cache/godot/Godot_v${GODOT_VERSION}-${RELEASE_TYPE}_linux.x86_64" ~/.cache/godot/godot
           chmod +x ~/.cache/godot/godot
-          rm -f "/tmp/${GODOT_ZIP}"
+          rm -f "$RUNNER_TEMP/${GODOT_ZIP}"
 
       - name: Add Godot to PATH
         run: |
@@ -89,11 +89,11 @@ jobs:
           GODOT_ZIP: "Godot_v${{ env.GODOT_VERSION }}-${{ env.RELEASE_TYPE }}_linux.x86_64.zip"
         run: |
           mkdir -p ~/.cache/godot
-          curl -fsSL "${GODOT_BASE_URL}/${GODOT_ZIP}" -o "/tmp/${GODOT_ZIP}"
-          unzip -q "/tmp/${GODOT_ZIP}" -d ~/.cache/godot
-          mv "$HOME/.cache/godot/Godot_v${GODOT_VERSION}-${RELEASE_TYPE}_linux.x86_64" ~/.cache/godot/godot
+          curl -fsSL "${GODOT_BASE_URL}/${GODOT_ZIP}" -o "$RUNNER_TEMP/${GODOT_ZIP}"
+          unzip -q -o "$RUNNER_TEMP/${GODOT_ZIP}" -d ~/.cache/godot
+          mv -f "$HOME/.cache/godot/Godot_v${GODOT_VERSION}-${RELEASE_TYPE}_linux.x86_64" ~/.cache/godot/godot
           chmod +x ~/.cache/godot/godot
-          rm -f "/tmp/${GODOT_ZIP}"
+          rm -f "$RUNNER_TEMP/${GODOT_ZIP}"
 
       - name: Download & Install Export Templates
         if: steps.templates-cache.outputs.cache-hit != 'true'
@@ -102,10 +102,11 @@ jobs:
           TEMPLATES_TPZ: "Godot_v${{ env.GODOT_VERSION }}-${{ env.RELEASE_TYPE }}_export_templates.tpz"
         run: |
           mkdir -p ~/.local/share/godot/export_templates/${GODOT_VERSION}.${RELEASE_TYPE}
-          curl -fsSL "${GODOT_BASE_URL}/${TEMPLATES_TPZ}" -o "/tmp/${TEMPLATES_TPZ}"
-          unzip -q "/tmp/${TEMPLATES_TPZ}" -d /tmp/godot_templates
-          mv /tmp/godot_templates/templates/* ~/.local/share/godot/export_templates/${GODOT_VERSION}.${RELEASE_TYPE}/
-          rm -rf "/tmp/${TEMPLATES_TPZ}" /tmp/godot_templates
+          rm -rf "$RUNNER_TEMP/godot_templates"
+          curl -fsSL "${GODOT_BASE_URL}/${TEMPLATES_TPZ}" -o "$RUNNER_TEMP/${TEMPLATES_TPZ}"
+          unzip -q -o "$RUNNER_TEMP/${TEMPLATES_TPZ}" -d "$RUNNER_TEMP/godot_templates"
+          mv -f "$RUNNER_TEMP/godot_templates/templates"/* ~/.local/share/godot/export_templates/${GODOT_VERSION}.${RELEASE_TYPE}/
+          rm -rf "$RUNNER_TEMP/${TEMPLATES_TPZ}" "$RUNNER_TEMP/godot_templates"
 
       - name: Add Godot to PATH
         run: |
