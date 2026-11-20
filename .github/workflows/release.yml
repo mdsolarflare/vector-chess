@@ -247,10 +247,13 @@ jobs:
           yes | "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
 
           # Setup debug keystore for EditorSettings validation
-          keytool -genkeypair -v -keystore "$RUNNER_TEMP/debug.keystore" \
-            -storepass android -alias androiddebugkey -keypass android \
-            -keyalg RSA -keysize 2048 -validity 10000 \
-            -dname "CN=Android Debug,O=Android,C=US"
+          (
+            umask 077
+            keytool -genkeypair -v -keystore "$RUNNER_TEMP/debug.keystore" \
+              -storepass android -alias androiddebugkey -keypass android \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+          )
 
           GODOT_MINOR=$(echo "${GODOT_VERSION}" | cut -d. -f1,2)
           mkdir -p ~/.config/godot
@@ -266,7 +269,10 @@ jobs:
 
           # Decode production upload keystore or generate ephemeral keystore for dry-run builds
           if [ -n "${ANDROID_KEYSTORE_BASE64}" ]; then
-            echo "${ANDROID_KEYSTORE_BASE64}" | base64 --decode > "$RUNNER_TEMP/release.keystore"
+            (
+              umask 077
+              echo "${ANDROID_KEYSTORE_BASE64}" | base64 --decode > "$RUNNER_TEMP/release.keystore"
+            )
             EOF_DELIM="EOF_$(cat /proc/sys/kernel/random/uuid)"
             {
               echo "GODOT_ANDROID_KEYSTORE_RELEASE_PATH=$RUNNER_TEMP/release.keystore"
@@ -284,10 +290,13 @@ jobs:
               echo "can_upload_play=false" >> "$GITHUB_OUTPUT"
             fi
           else
-            keytool -genkeypair -v -keystore "$RUNNER_TEMP/ephemeral.keystore" \
-              -storepass vectorchess -alias vectorchess -keypass vectorchess \
-              -keyalg RSA -keysize 2048 -validity 10000 \
-              -dname "CN=Vector Chess Dry Run,O=VectorChess,C=US"
+            (
+              umask 077
+              keytool -genkeypair -v -keystore "$RUNNER_TEMP/ephemeral.keystore" \
+                -storepass vectorchess -alias vectorchess -keypass vectorchess \
+                -keyalg RSA -keysize 2048 -validity 10000 \
+                -dname "CN=Vector Chess Dry Run,O=VectorChess,C=US"
+            )
             echo "GODOT_ANDROID_KEYSTORE_RELEASE_PATH=$RUNNER_TEMP/ephemeral.keystore" >> "$GITHUB_ENV"
             echo "GODOT_ANDROID_KEYSTORE_RELEASE_USER=vectorchess" >> "$GITHUB_ENV"
             echo "GODOT_ANDROID_KEYSTORE_RELEASE_PASSWORD=vectorchess" >> "$GITHUB_ENV"
@@ -305,6 +314,11 @@ jobs:
           godot --headless --export-release "Android (APK)" "dist/${EXPORT_NAME}-v${VERSION}.apk"
           test -f "dist/${EXPORT_NAME}-v${VERSION}.aab"
           test -f "dist/${EXPORT_NAME}-v${VERSION}.apk"
+
+      - name: Cleanup Android Signing Keystores
+        if: always()
+        run: |
+          rm -f "$RUNNER_TEMP/release.keystore" "$RUNNER_TEMP/ephemeral.keystore" "$RUNNER_TEMP/debug.keystore"
 
       - name: Upload to Google Play (Internal Track)
         if: inputs.upload_to_stores == true && steps.android-config.outputs.can_upload_play == 'true'
@@ -474,8 +488,8 @@ jobs:
               presets_text,
               flags=re.MULTILINE,
           )
-          if n_short == 0 or n_ver == 0:
-              raise SystemExit("Failed to update version fields in export_presets.cfg")
+          if n_short < 2 or n_ver < 2:
+              raise SystemExit("Failed to update macOS and iOS version fields in export_presets.cfg")
           presets_path.write_text(presets_text, encoding="utf-8")
           PY
 
@@ -542,13 +556,28 @@ jobs:
             KEYCHAIN_PASS=$(uuidgen)
             NOTARIZE_ZIP="$RUNNER_TEMP/${EXPORT_NAME}-notarize.zip"
             trap 'rm -rf "$RUNNER_TEMP/macos_cert.p12" "$RUNNER_TEMP/private_keys" "${NOTARIZE_ZIP}"; security delete-keychain "${KEYCHAIN_PATH}" 2>/dev/null || true' EXIT
-            echo "${APPLE_CERTIFICATE_BASE64}" | base64 --decode > "$RUNNER_TEMP/macos_cert.p12"
+            (
+              umask 077
+              echo "${APPLE_CERTIFICATE_BASE64}" | base64 --decode > "$RUNNER_TEMP/macos_cert.p12"
+            )
 
             security create-keychain -p "${KEYCHAIN_PASS}" "${KEYCHAIN_PATH}"
             security set-keychain-settings -lut 21600 "${KEYCHAIN_PATH}"
             security unlock-keychain -p "${KEYCHAIN_PASS}" "${KEYCHAIN_PATH}"
             security import "$RUNNER_TEMP/macos_cert.p12" -P "${APPLE_CERTIFICATE_PASSWORD}" -A -t cert -f pkcs12 -k "${KEYCHAIN_PATH}"
-            security list-keychain -d user -s "${KEYCHAIN_PATH}" $(security list-keychains -d user | tr -d '"')
+            EXISTING_KEYCHAINS=()
+            while IFS= read -r kc; do
+              kc="${kc#"${kc%%[![:space:]]*}"}"
+              kc="${kc%"${kc##*[![:space:]]}"}"
+              kc="${kc#\"}"
+              kc="${kc%\"}"
+              if [ -n "${kc}" ]; then
+                EXISTING_KEYCHAINS+=("${kc}")
+              fi
+            done <<EOF
+          $(security list-keychains -d user)
+          EOF
+            security list-keychain -d user -s "${KEYCHAIN_PATH}" ${EXISTING_KEYCHAINS[@]+"${EXISTING_KEYCHAINS[@]}"}
             security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "${KEYCHAIN_PASS}" "${KEYCHAIN_PATH}"
 
             IDENTITY="${APPLE_SIGNING_IDENTITY:-Developer ID Application}"
@@ -559,10 +588,12 @@ jobs:
                 echo "::error::Invalid APPLE_API_KEY_ID format."
                 exit 1
               fi
-              mkdir -p "$RUNNER_TEMP/private_keys"
               KEY_FILE="$RUNNER_TEMP/private_keys/AuthKey_${APPLE_API_KEY_ID}.p8"
-              printf "%s\n" "${APPLE_API_PRIVATE_KEY}" > "${KEY_FILE}"
-              chmod 600 "${KEY_FILE}"
+              (
+                umask 077
+                mkdir -p "$RUNNER_TEMP/private_keys"
+                printf "%s\n" "${APPLE_API_PRIVATE_KEY}" > "${KEY_FILE}"
+              )
               ditto -c -k --keepParent "build/macos/${EXPORT_NAME}.app" "${NOTARIZE_ZIP}"
               xcrun notarytool submit "${NOTARIZE_ZIP}" \
                 --key "${KEY_FILE}" \
@@ -584,7 +615,7 @@ jobs:
 
           # Preserve bundle symlinks & permissions for GitHub Release and Steam depot
           ditto -c -k --keepParent "build/macos/${EXPORT_NAME}.app" "dist/${EXPORT_NAME}-macOS-v${VERSION}.zip"
-          tar -cf build/steam-macos.tar -C build macos
+          COPYFILE_DISABLE=1 tar -cf build/steam-macos.tar -C build macos
 
       - name: Export iOS (.ipa or Xcode Project)
         env:
@@ -613,17 +644,35 @@ jobs:
             KEYCHAIN_PASS=$(uuidgen)
             INSTALLED_PROFILE=""
             trap 'rm -rf "$RUNNER_TEMP/ios_cert.p12" "$RUNNER_TEMP/profile.mobileprovision" "$RUNNER_TEMP/profile.plist" "$RUNNER_TEMP/private_keys" ${INSTALLED_PROFILE:+"${INSTALLED_PROFILE}"}; security delete-keychain "${KEYCHAIN_PATH}" 2>/dev/null || true' EXIT
-            echo "${APPLE_IOS_CERT_BASE64}" | base64 --decode > "$RUNNER_TEMP/ios_cert.p12"
-            echo "${APPLE_PROVISION_BASE64}" | base64 --decode > "$RUNNER_TEMP/profile.mobileprovision"
+            (
+              umask 077
+              echo "${APPLE_IOS_CERT_BASE64}" | base64 --decode > "$RUNNER_TEMP/ios_cert.p12"
+              echo "${APPLE_PROVISION_BASE64}" | base64 --decode > "$RUNNER_TEMP/profile.mobileprovision"
+            )
 
             security create-keychain -p "${KEYCHAIN_PASS}" "${KEYCHAIN_PATH}"
             security set-keychain-settings -lut 21600 "${KEYCHAIN_PATH}"
             security unlock-keychain -p "${KEYCHAIN_PASS}" "${KEYCHAIN_PATH}"
             security import "$RUNNER_TEMP/ios_cert.p12" -P "${APPLE_IOS_CERT_PASSWORD}" -A -t cert -f pkcs12 -k "${KEYCHAIN_PATH}"
-            security list-keychain -d user -s "${KEYCHAIN_PATH}" $(security list-keychains -d user | tr -d '"')
+            EXISTING_KEYCHAINS=()
+            while IFS= read -r kc; do
+              kc="${kc#"${kc%%[![:space:]]*}"}"
+              kc="${kc%"${kc##*[![:space:]]}"}"
+              kc="${kc#\"}"
+              kc="${kc%\"}"
+              if [ -n "${kc}" ]; then
+                EXISTING_KEYCHAINS+=("${kc}")
+              fi
+            done <<EOF
+          $(security list-keychains -d user)
+          EOF
+            security list-keychain -d user -s "${KEYCHAIN_PATH}" ${EXISTING_KEYCHAINS[@]+"${EXISTING_KEYCHAINS[@]}"}
             security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "${KEYCHAIN_PASS}" "${KEYCHAIN_PATH}"
 
-            security cms -D -i "$RUNNER_TEMP/profile.mobileprovision" > "$RUNNER_TEMP/profile.plist"
+            (
+              umask 077
+              security cms -D -i "$RUNNER_TEMP/profile.mobileprovision" > "$RUNNER_TEMP/profile.plist"
+            )
             PROFILE_UUID=$(/usr/libexec/PlistBuddy -c "Print UUID" "$RUNNER_TEMP/profile.plist")
             if [[ ! "${PROFILE_UUID}" =~ ^[0-9A-Fa-f-]+$ ]]; then
               echo "::error::Invalid provisioning profile UUID."
@@ -631,7 +680,10 @@ jobs:
             fi
             mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
             INSTALLED_PROFILE="$HOME/Library/MobileDevice/Provisioning Profiles/${PROFILE_UUID}.mobileprovision"
-            cp "$RUNNER_TEMP/profile.mobileprovision" "${INSTALLED_PROFILE}"
+            (
+              umask 077
+              cp "$RUNNER_TEMP/profile.mobileprovision" "${INSTALLED_PROFILE}"
+            )
 
             python3 -c '
           import pathlib, sys
@@ -654,9 +706,11 @@ jobs:
                 echo "::error::Invalid APPLE_API_KEY_ID format."
                 exit 1
               fi
-              mkdir -p "$RUNNER_TEMP/private_keys"
-              printf "%s\n" "${APPLE_API_PRIVATE_KEY}" > "$RUNNER_TEMP/private_keys/AuthKey_${APPLE_API_KEY_ID}.p8"
-              chmod 600 "$RUNNER_TEMP/private_keys/AuthKey_${APPLE_API_KEY_ID}.p8"
+              (
+                umask 077
+                mkdir -p "$RUNNER_TEMP/private_keys"
+                printf "%s\n" "${APPLE_API_PRIVATE_KEY}" > "$RUNNER_TEMP/private_keys/AuthKey_${APPLE_API_KEY_ID}.p8"
+              )
               export API_PRIVATE_KEYS_DIR="$RUNNER_TEMP/private_keys"
 
               TRANSPORTER_BIN=""
@@ -667,10 +721,14 @@ jobs:
               fi
 
               if [ -n "${TRANSPORTER_BIN}" ]; then
-                "${TRANSPORTER_BIN}" -m upload \
-                  -assetFile "${IPA_PATH}" \
-                  -apiKey "${APPLE_API_KEY_ID}" \
-                  -apiIssuer "${APPLE_API_ISSUER_ID}"
+                IPA_ABS_PATH="$(pwd)/${IPA_PATH}"
+                (
+                  cd "$RUNNER_TEMP"
+                  "${TRANSPORTER_BIN}" -m upload \
+                    -assetFile "${IPA_ABS_PATH}" \
+                    -apiKey "${APPLE_API_KEY_ID}" \
+                    -apiIssuer "${APPLE_API_ISSUER_ID}"
+                )
               else
                 RESOLVED_APP_ID="${APPLE_APP_ID}"
                 if [ -z "${RESOLVED_APP_ID}" ]; then
@@ -688,25 +746,26 @@ jobs:
               return re.sub(r"[^a-z0-9]", "", str(key).lower())
           def is_num_id(val):
               return isinstance(val, (int, str)) and not isinstance(val, bool) and str(val).isdigit()
-          def pick(mapping, allowed):
+          def pick(mapping, allowed, pred=None):
               if not isinstance(mapping, dict):
                   return None
               for mk, mv in mapping.items():
                   if norm(mk) in allowed and mv is not None and mv != "":
-                      return mv
+                      if pred is None or pred(mv):
+                          return mv
               return None
           def search(node):
               if isinstance(node, dict):
                   attrs = node.get("attributes") if isinstance(node.get("attributes"), dict) else None
                   bid = pick(node, BUNDLE_KEYS) or pick(attrs, BUNDLE_KEYS)
-                  aid = pick(node, APP_ID_KEYS) or pick(attrs, APP_ID_KEYS)
+                  aid = pick(node, APP_ID_KEYS, is_num_id) or pick(attrs, APP_ID_KEYS, is_num_id)
                   if bid == target and is_num_id(aid):
                       return str(aid)
                   for k, v in node.items():
                       if k == target:
                           if is_num_id(v):
                               return str(v)
-                          nested_aid = pick(v, APP_ID_KEYS)
+                          nested_aid = pick(v, APP_ID_KEYS, is_num_id)
                           if is_num_id(nested_aid):
                               return str(nested_aid)
                       if v == target and is_num_id(k):
@@ -866,19 +925,24 @@ jobs:
             echo "::warning::STEAM_USERNAME or STEAM_CONFIG_VDF secret not set; skipping SteamPipe upload."
             exit 0
           fi
+          if [[ ! "${STEAM_USERNAME}" =~ ^[A-Za-z0-9_.-]+$ ]]; then
+            echo "::error::Invalid STEAM_USERNAME format."
+            exit 1
+          fi
           STEAM_DIR="$RUNNER_TEMP/steamcmd"
           trap 'rm -rf "${STEAM_DIR}" "$HOME/Steam" "$HOME/.local/share/Steam" "$HOME/.steam"' EXIT
           sudo dpkg --add-architecture i386
           sudo apt-get update -qq
           sudo apt-get install -y -qq lib32gcc-s1 >/dev/null
-          mkdir -p "${STEAM_DIR}/config" "$HOME/Steam/config" "$HOME/.local/share/Steam/config"
+          mkdir -p "${STEAM_DIR}"
           curl -fsSL "https://steamcdn-a.akamaihd.net/client/installer/steamcmd_linux.tar.gz" | tar -xz -C "${STEAM_DIR}"
-          echo "${STEAM_CONFIG_VDF}" | base64 --decode > "${STEAM_DIR}/config/config.vdf"
-          chmod 600 "${STEAM_DIR}/config/config.vdf"
-          cp "${STEAM_DIR}/config/config.vdf" "$HOME/Steam/config/config.vdf"
-          chmod 600 "$HOME/Steam/config/config.vdf"
-          cp "${STEAM_DIR}/config/config.vdf" "$HOME/.local/share/Steam/config/config.vdf"
-          chmod 600 "$HOME/.local/share/Steam/config/config.vdf"
+          (
+            umask 077
+            mkdir -p "${STEAM_DIR}/config" "$HOME/Steam/config" "$HOME/.local/share/Steam/config"
+            echo "${STEAM_CONFIG_VDF}" | base64 --decode > "${STEAM_DIR}/config/config.vdf"
+            cp "${STEAM_DIR}/config/config.vdf" "$HOME/Steam/config/config.vdf"
+            cp "${STEAM_DIR}/config/config.vdf" "$HOME/.local/share/Steam/config/config.vdf"
+          )
           "${STEAM_DIR}/steamcmd.sh" \
             +@ShutdownOnFailedCommand 1 \
             +@NoPromptForPassword 1 \
@@ -916,6 +980,26 @@ jobs:
           TARGET_SHA: ${{ github.sha }}
         run: |
           if gh release view "${TAG_NAME}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            EXISTING_REF_JSON=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG_NAME}" 2>/dev/null || true)
+            if [ -n "${EXISTING_REF_JSON}" ]; then
+              EXISTING_SHA=$(EXISTING_REF_JSON="${EXISTING_REF_JSON}" GH_REPO="${GITHUB_REPOSITORY}" python3 -c '
+          import json, os, subprocess
+          repo = os.environ["GH_REPO"]
+          ref = json.loads(os.environ["EXISTING_REF_JSON"]).get("object") or {}
+          sha, kind = ref.get("sha", ""), ref.get("type", "")
+          if kind == "tag" and sha:
+              tag_obj = subprocess.run(
+                  ["gh", "api", f"repos/{repo}/git/tags/{sha}"],
+                  capture_output=True, text=True, check=False
+              )
+              if tag_obj.returncode == 0:
+                  sha = (json.loads(tag_obj.stdout).get("object") or {}).get("sha", sha)
+          print(sha)
+          ' 2>/dev/null || true)
+              if [ -n "${EXISTING_SHA}" ] && [ "${EXISTING_SHA}" != "${TARGET_SHA}" ]; then
+                echo "::warning::Release ${TAG_NAME} already points to ${EXISTING_SHA::7}; uploading assets built from ${TARGET_SHA::7} without moving the existing git tag."
+              fi
+            fi
             gh release upload "${TAG_NAME}" release-assets/* \
               --repo "${GITHUB_REPOSITORY}" \
               --clobber
