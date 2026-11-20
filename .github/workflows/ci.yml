@@ -27,30 +27,22 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Setup Godot Binary Cache
-        id: godot-cache
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/godot
-          key: godot-${{ env.GODOT_VERSION }}-${{ env.RELEASE_TYPE }}-linux-x86_64
-
       - name: Download & Install Godot Binary
-        if: steps.godot-cache.outputs.cache-hit != 'true'
         env:
           GODOT_BASE_URL: "https://github.com/godotengine/godot/releases/download/${{ env.GODOT_VERSION }}-${{ env.RELEASE_TYPE }}"
           GODOT_ZIP: "Godot_v${{ env.GODOT_VERSION }}-${{ env.RELEASE_TYPE }}_linux.x86_64.zip"
         run: |
-          mkdir -p ~/.cache/godot
-          curl -fsSL "${GODOT_BASE_URL}/${GODOT_ZIP}" -o "$RUNNER_TEMP/${GODOT_ZIP}"
-          unzip -q -o "$RUNNER_TEMP/${GODOT_ZIP}" -d ~/.cache/godot
-          mv -f "$HOME/.cache/godot/Godot_v${GODOT_VERSION}-${RELEASE_TYPE}_linux.x86_64" ~/.cache/godot/godot
-          chmod +x ~/.cache/godot/godot
-          rm -f "$RUNNER_TEMP/${GODOT_ZIP}"
-
-      - name: Add Godot to PATH
-        run: |
-          echo "$HOME/.cache/godot" >> "$GITHUB_PATH"
-          $HOME/.cache/godot/godot --version
+          GODOT_DIR="$HOME/.cache/godot/${GODOT_VERSION}-${RELEASE_TYPE}"
+          if [ ! -x "${GODOT_DIR}/godot" ]; then
+            mkdir -p "${GODOT_DIR}"
+            curl -fsSL --retry 3 --retry-delay 2 "${GODOT_BASE_URL}/${GODOT_ZIP}" -o "$RUNNER_TEMP/${GODOT_ZIP}"
+            unzip -q -o "$RUNNER_TEMP/${GODOT_ZIP}" -d "${GODOT_DIR}"
+            mv -f "${GODOT_DIR}/Godot_v${GODOT_VERSION}-${RELEASE_TYPE}_linux.x86_64" "${GODOT_DIR}/godot"
+            chmod +x "${GODOT_DIR}/godot"
+            rm -f "$RUNNER_TEMP/${GODOT_ZIP}"
+          fi
+          echo "${GODOT_DIR}" >> "$GITHUB_PATH"
+          "${GODOT_DIR}/godot" --version
 
       - name: Import Project Resources Headlessly
         run: |
@@ -68,50 +60,35 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Setup Godot Binary Cache
-        id: godot-cache
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/godot
-          key: godot-${{ env.GODOT_VERSION }}-${{ env.RELEASE_TYPE }}-linux-x86_64
-
-      - name: Setup Export Templates Cache
-        id: templates-cache
-        uses: actions/cache@v4
-        with:
-          path: ~/.local/share/godot/export_templates
-          key: godot-templates-${{ env.GODOT_VERSION }}-${{ env.RELEASE_TYPE }}
-
       - name: Download & Install Godot Binary
-        if: steps.godot-cache.outputs.cache-hit != 'true'
         env:
           GODOT_BASE_URL: "https://github.com/godotengine/godot/releases/download/${{ env.GODOT_VERSION }}-${{ env.RELEASE_TYPE }}"
           GODOT_ZIP: "Godot_v${{ env.GODOT_VERSION }}-${{ env.RELEASE_TYPE }}_linux.x86_64.zip"
         run: |
-          mkdir -p ~/.cache/godot
-          curl -fsSL "${GODOT_BASE_URL}/${GODOT_ZIP}" -o "$RUNNER_TEMP/${GODOT_ZIP}"
-          unzip -q -o "$RUNNER_TEMP/${GODOT_ZIP}" -d ~/.cache/godot
-          mv -f "$HOME/.cache/godot/Godot_v${GODOT_VERSION}-${RELEASE_TYPE}_linux.x86_64" ~/.cache/godot/godot
-          chmod +x ~/.cache/godot/godot
-          rm -f "$RUNNER_TEMP/${GODOT_ZIP}"
+          GODOT_DIR="$HOME/.cache/godot/${GODOT_VERSION}-${RELEASE_TYPE}"
+          if [ ! -x "${GODOT_DIR}/godot" ]; then
+            mkdir -p "${GODOT_DIR}"
+            curl -fsSL --retry 3 --retry-delay 2 "${GODOT_BASE_URL}/${GODOT_ZIP}" -o "$RUNNER_TEMP/${GODOT_ZIP}"
+            unzip -q -o "$RUNNER_TEMP/${GODOT_ZIP}" -d "${GODOT_DIR}"
+            mv -f "${GODOT_DIR}/Godot_v${GODOT_VERSION}-${RELEASE_TYPE}_linux.x86_64" "${GODOT_DIR}/godot"
+            chmod +x "${GODOT_DIR}/godot"
+            rm -f "$RUNNER_TEMP/${GODOT_ZIP}"
+          fi
+          echo "${GODOT_DIR}" >> "$GITHUB_PATH"
+          "${GODOT_DIR}/godot" --version
 
-      - name: Download & Install Export Templates
-        if: steps.templates-cache.outputs.cache-hit != 'true'
+      - name: Download & Install Web Export Templates
         env:
           GODOT_BASE_URL: "https://github.com/godotengine/godot/releases/download/${{ env.GODOT_VERSION }}-${{ env.RELEASE_TYPE }}"
           TEMPLATES_TPZ: "Godot_v${{ env.GODOT_VERSION }}-${{ env.RELEASE_TYPE }}_export_templates.tpz"
         run: |
-          mkdir -p ~/.local/share/godot/export_templates/${GODOT_VERSION}.${RELEASE_TYPE}
-          rm -rf "$RUNNER_TEMP/godot_templates"
-          curl -fsSL "${GODOT_BASE_URL}/${TEMPLATES_TPZ}" -o "$RUNNER_TEMP/${TEMPLATES_TPZ}"
-          unzip -q -o "$RUNNER_TEMP/${TEMPLATES_TPZ}" -d "$RUNNER_TEMP/godot_templates"
-          mv -f "$RUNNER_TEMP/godot_templates/templates"/* ~/.local/share/godot/export_templates/${GODOT_VERSION}.${RELEASE_TYPE}/
-          rm -rf "$RUNNER_TEMP/${TEMPLATES_TPZ}" "$RUNNER_TEMP/godot_templates"
-
-      - name: Add Godot to PATH
-        run: |
-          echo "$HOME/.cache/godot" >> "$GITHUB_PATH"
-          $HOME/.cache/godot/godot --version
+          TEMPLATE_DIR="$HOME/.local/share/godot/export_templates/${GODOT_VERSION}.${RELEASE_TYPE}"
+          if [ ! -f "${TEMPLATE_DIR}/version.txt" ] || [ ! -f "${TEMPLATE_DIR}/web_nothreads_release.zip" ]; then
+            mkdir -p "${TEMPLATE_DIR}"
+            curl -fsSL --retry 3 --retry-delay 2 "${GODOT_BASE_URL}/${TEMPLATES_TPZ}" -o "$RUNNER_TEMP/${TEMPLATES_TPZ}"
+            unzip -j -q -o "$RUNNER_TEMP/${TEMPLATES_TPZ}" 'templates/web_*.zip' 'templates/version.txt' -d "${TEMPLATE_DIR}"
+            rm -f "$RUNNER_TEMP/${TEMPLATES_TPZ}"
+          fi
 
       - name: Import Project & Export Web Build
         env:

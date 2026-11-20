@@ -82,30 +82,27 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Cache Godot Binary
-        id: godot-cache
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/godot
-          key: godot-${{ env.GODOT_VERSION }}-${{ env.RELEASE_TYPE }}-linux-x86_64
-
       - name: Install Godot Binary
-        if: steps.godot-cache.outputs.cache-hit != 'true'
         env:
           BASE_URL: "https://github.com/godotengine/godot/releases/download/${{ env.GODOT_VERSION }}-${{ env.RELEASE_TYPE }}"
           ZIP_NAME: "Godot_v${{ env.GODOT_VERSION }}-${{ env.RELEASE_TYPE }}_linux.x86_64.zip"
         run: |
-          mkdir -p ~/.cache/godot
-          curl -fsSL "${BASE_URL}/${ZIP_NAME}" -o "$RUNNER_TEMP/${ZIP_NAME}"
-          unzip -q -o "$RUNNER_TEMP/${ZIP_NAME}" -d ~/.cache/godot
-          mv -f "$HOME/.cache/godot/Godot_v${GODOT_VERSION}-${RELEASE_TYPE}_linux.x86_64" ~/.cache/godot/godot
-          chmod +x ~/.cache/godot/godot
-          rm -f "$RUNNER_TEMP/${ZIP_NAME}"
+          GODOT_DIR="$HOME/.cache/godot/${GODOT_VERSION}-${RELEASE_TYPE}"
+          if [ ! -x "${GODOT_DIR}/godot" ]; then
+            mkdir -p "${GODOT_DIR}"
+            curl -fsSL --retry 3 --retry-delay 2 "${BASE_URL}/${ZIP_NAME}" -o "$RUNNER_TEMP/${ZIP_NAME}"
+            unzip -q -o "$RUNNER_TEMP/${ZIP_NAME}" -d "${GODOT_DIR}"
+            mv -f "${GODOT_DIR}/Godot_v${GODOT_VERSION}-${RELEASE_TYPE}_linux.x86_64" "${GODOT_DIR}/godot"
+            chmod +x "${GODOT_DIR}/godot"
+            rm -f "$RUNNER_TEMP/${ZIP_NAME}"
+          fi
+          echo "${GODOT_DIR}" >> "$GITHUB_PATH"
+          "${GODOT_DIR}/godot" --version
 
       - name: Import & Run Tests
         run: |
-          "$HOME/.cache/godot/godot" --headless --import
-          "$HOME/.cache/godot/godot" --headless -s res://tests/test_rules.gd
+          godot --headless --import
+          godot --headless -s res://tests/test_rules.gd
 
   # ---------------------------------------------------------------------------
   # 2. Build Windows (Steam), Linux/Deck (Steam), and Android (.aab & .apk)
@@ -164,50 +161,41 @@ jobs:
           distribution: "temurin"
           java-version: "17"
 
-      - name: Cache Godot Binary
-        id: godot-cache
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/godot
-          key: godot-${{ env.GODOT_VERSION }}-${{ env.RELEASE_TYPE }}-linux-x86_64
-
-      - name: Cache Export Templates
-        id: templates-cache
-        uses: actions/cache@v4
-        with:
-          path: ~/.local/share/godot/export_templates
-          key: godot-templates-${{ env.GODOT_VERSION }}-${{ env.RELEASE_TYPE }}
-
       - name: Install Godot Binary
-        if: steps.godot-cache.outputs.cache-hit != 'true'
         env:
           BASE_URL: "https://github.com/godotengine/godot/releases/download/${{ env.GODOT_VERSION }}-${{ env.RELEASE_TYPE }}"
           ZIP_NAME: "Godot_v${{ env.GODOT_VERSION }}-${{ env.RELEASE_TYPE }}_linux.x86_64.zip"
         run: |
-          mkdir -p ~/.cache/godot
-          curl -fsSL "${BASE_URL}/${ZIP_NAME}" -o "$RUNNER_TEMP/${ZIP_NAME}"
-          unzip -q -o "$RUNNER_TEMP/${ZIP_NAME}" -d ~/.cache/godot
-          mv -f "$HOME/.cache/godot/Godot_v${GODOT_VERSION}-${RELEASE_TYPE}_linux.x86_64" ~/.cache/godot/godot
-          chmod +x ~/.cache/godot/godot
-          rm -f "$RUNNER_TEMP/${ZIP_NAME}"
+          GODOT_DIR="$HOME/.cache/godot/${GODOT_VERSION}-${RELEASE_TYPE}"
+          if [ ! -x "${GODOT_DIR}/godot" ]; then
+            mkdir -p "${GODOT_DIR}"
+            curl -fsSL --retry 3 --retry-delay 2 "${BASE_URL}/${ZIP_NAME}" -o "$RUNNER_TEMP/${ZIP_NAME}"
+            unzip -q -o "$RUNNER_TEMP/${ZIP_NAME}" -d "${GODOT_DIR}"
+            mv -f "${GODOT_DIR}/Godot_v${GODOT_VERSION}-${RELEASE_TYPE}_linux.x86_64" "${GODOT_DIR}/godot"
+            chmod +x "${GODOT_DIR}/godot"
+            rm -f "$RUNNER_TEMP/${ZIP_NAME}"
+          fi
+          echo "${GODOT_DIR}" >> "$GITHUB_PATH"
+          "${GODOT_DIR}/godot" --version
 
       - name: Install Export Templates
-        if: steps.templates-cache.outputs.cache-hit != 'true'
         env:
           BASE_URL: "https://github.com/godotengine/godot/releases/download/${{ env.GODOT_VERSION }}-${{ env.RELEASE_TYPE }}"
           TPZ_NAME: "Godot_v${{ env.GODOT_VERSION }}-${{ env.RELEASE_TYPE }}_export_templates.tpz"
         run: |
-          mkdir -p ~/.local/share/godot/export_templates/${GODOT_VERSION}.${RELEASE_TYPE}
-          rm -rf "$RUNNER_TEMP/godot_templates"
-          curl -fsSL "${BASE_URL}/${TPZ_NAME}" -o "$RUNNER_TEMP/${TPZ_NAME}"
-          unzip -q -o "$RUNNER_TEMP/${TPZ_NAME}" -d "$RUNNER_TEMP/godot_templates"
-          mv -f "$RUNNER_TEMP/godot_templates/templates"/* ~/.local/share/godot/export_templates/${GODOT_VERSION}.${RELEASE_TYPE}/
-          rm -rf "$RUNNER_TEMP/${TPZ_NAME}" "$RUNNER_TEMP/godot_templates"
+          TEMPLATE_DIR="$HOME/.local/share/godot/export_templates/${GODOT_VERSION}.${RELEASE_TYPE}"
+          if [ ! -f "${TEMPLATE_DIR}/android_source.zip" ] || [ ! -f "${TEMPLATE_DIR}/linux_release.x86_64" ] || [ ! -f "${TEMPLATE_DIR}/windows_release_x86_64.exe" ]; then
+            mkdir -p "${TEMPLATE_DIR}"
+            rm -rf "$RUNNER_TEMP/godot_templates"
+            curl -fsSL --retry 3 --retry-delay 2 "${BASE_URL}/${TPZ_NAME}" -o "$RUNNER_TEMP/${TPZ_NAME}"
+            unzip -q -o "$RUNNER_TEMP/${TPZ_NAME}" -d "$RUNNER_TEMP/godot_templates"
+            mv -f "$RUNNER_TEMP/godot_templates/templates"/* "${TEMPLATE_DIR}/"
+            rm -rf "$RUNNER_TEMP/${TPZ_NAME}" "$RUNNER_TEMP/godot_templates"
+          fi
 
-      - name: Add Godot to PATH & Import Project
+      - name: Import Project Headlessly
         run: |
-          echo "$HOME/.cache/godot" >> "$GITHUB_PATH"
-          $HOME/.cache/godot/godot --headless --import
+          godot --headless --import
 
       - name: Export Windows & Linux Depots
         env:
@@ -498,49 +486,39 @@ jobs:
           presets_path.write_text(presets_text, encoding="utf-8")
           PY
 
-      - name: Cache Godot macOS Binary
-        id: godot-mac-cache
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/godot-macos
-          key: godot-${{ env.GODOT_VERSION }}-${{ env.RELEASE_TYPE }}-macos-universal
-
-      - name: Cache Export Templates (macOS)
-        id: templates-mac-cache
-        uses: actions/cache@v4
-        with:
-          path: ~/Library/Application Support/Godot/export_templates
-          key: godot-templates-macos-${{ env.GODOT_VERSION }}-${{ env.RELEASE_TYPE }}
-
       - name: Install Godot macOS Binary
-        if: steps.godot-mac-cache.outputs.cache-hit != 'true'
         env:
           BASE_URL: "https://github.com/godotengine/godot/releases/download/${{ env.GODOT_VERSION }}-${{ env.RELEASE_TYPE }}"
           ZIP_NAME: "Godot_v${{ env.GODOT_VERSION }}-${{ env.RELEASE_TYPE }}_macos.universal.zip"
         run: |
-          mkdir -p ~/.cache/godot-macos
-          rm -rf ~/.cache/godot-macos/Godot.app
-          curl -fsSL "${BASE_URL}/${ZIP_NAME}" -o "$RUNNER_TEMP/${ZIP_NAME}"
-          unzip -q -o "$RUNNER_TEMP/${ZIP_NAME}" -d ~/.cache/godot-macos
-          rm -f "$RUNNER_TEMP/${ZIP_NAME}"
+          GODOT_DIR="$HOME/.cache/godot-macos/${GODOT_VERSION}-${RELEASE_TYPE}"
+          if [ ! -x "${GODOT_DIR}/Godot.app/Contents/MacOS/Godot" ]; then
+            mkdir -p "${GODOT_DIR}"
+            rm -rf "${GODOT_DIR}/Godot.app"
+            curl -fsSL --retry 3 --retry-delay 2 "${BASE_URL}/${ZIP_NAME}" -o "$RUNNER_TEMP/${ZIP_NAME}"
+            unzip -q -o "$RUNNER_TEMP/${ZIP_NAME}" -d "${GODOT_DIR}"
+            rm -f "$RUNNER_TEMP/${ZIP_NAME}"
+          fi
+          "${GODOT_DIR}/Godot.app/Contents/MacOS/Godot" --version
 
       - name: Install Export Templates (macOS)
-        if: steps.templates-mac-cache.outputs.cache-hit != 'true'
         env:
           BASE_URL: "https://github.com/godotengine/godot/releases/download/${{ env.GODOT_VERSION }}-${{ env.RELEASE_TYPE }}"
           TPZ_NAME: "Godot_v${{ env.GODOT_VERSION }}-${{ env.RELEASE_TYPE }}_export_templates.tpz"
         run: |
           TEMPLATE_DIR="$HOME/Library/Application Support/Godot/export_templates/${GODOT_VERSION}.${RELEASE_TYPE}"
-          mkdir -p "${TEMPLATE_DIR}"
-          rm -rf "$RUNNER_TEMP/godot_templates"
-          curl -fsSL "${BASE_URL}/${TPZ_NAME}" -o "$RUNNER_TEMP/${TPZ_NAME}"
-          unzip -q -o "$RUNNER_TEMP/${TPZ_NAME}" -d "$RUNNER_TEMP/godot_templates"
-          mv -f "$RUNNER_TEMP/godot_templates/templates"/* "${TEMPLATE_DIR}/"
-          rm -rf "$RUNNER_TEMP/${TPZ_NAME}" "$RUNNER_TEMP/godot_templates"
+          if [ ! -f "${TEMPLATE_DIR}/macos.zip" ] || [ ! -f "${TEMPLATE_DIR}/ios.zip" ]; then
+            mkdir -p "${TEMPLATE_DIR}"
+            rm -rf "$RUNNER_TEMP/godot_templates"
+            curl -fsSL --retry 3 --retry-delay 2 "${BASE_URL}/${TPZ_NAME}" -o "$RUNNER_TEMP/${TPZ_NAME}"
+            unzip -q -o "$RUNNER_TEMP/${TPZ_NAME}" -d "$RUNNER_TEMP/godot_templates"
+            mv -f "$RUNNER_TEMP/godot_templates/templates"/* "${TEMPLATE_DIR}/"
+            rm -rf "$RUNNER_TEMP/${TPZ_NAME}" "$RUNNER_TEMP/godot_templates"
+          fi
 
       - name: Import Project Headlessly
         run: |
-          GODOT_BIN="$HOME/.cache/godot-macos/Godot.app/Contents/MacOS/Godot"
+          GODOT_BIN="$HOME/.cache/godot-macos/${GODOT_VERSION}-${RELEASE_TYPE}/Godot.app/Contents/MacOS/Godot"
           "${GODOT_BIN}" --headless --import
 
       - name: Export, Sign & Notarize macOS Universal App (Steam)
@@ -553,7 +531,7 @@ jobs:
           APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
           APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
         run: |
-          GODOT_BIN="$HOME/.cache/godot-macos/Godot.app/Contents/MacOS/Godot"
+          GODOT_BIN="$HOME/.cache/godot-macos/${GODOT_VERSION}-${RELEASE_TYPE}/Godot.app/Contents/MacOS/Godot"
           mkdir -p build/macos dist
           "${GODOT_BIN}" --headless --export-release "macOS" "build/macos/${EXPORT_NAME}.app"
           test -d "build/macos/${EXPORT_NAME}.app"
@@ -639,7 +617,7 @@ jobs:
           APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
           UPLOAD_TO_STORES: ${{ inputs.upload_to_stores == true }}
         run: |
-          GODOT_BIN="$HOME/.cache/godot-macos/Godot.app/Contents/MacOS/Godot"
+          GODOT_BIN="$HOME/.cache/godot-macos/${GODOT_VERSION}-${RELEASE_TYPE}/Godot.app/Contents/MacOS/Godot"
           mkdir -p build/ios dist
 
           if [ -n "${APPLE_TEAM_ID}" ] && [ -n "${APPLE_IOS_CERT_BASE64}" ] && [ -n "${APPLE_PROVISION_BASE64}" ]; then
