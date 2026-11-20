@@ -84,9 +84,10 @@ func choose_move_async(
 	_order_moves(state, legal_moves)
 
 	var best_move: GameRules.VectorMove = legal_moves[0]
+	var best_raw_score: int = -INF_SCORE
 	var best_score: int = -INF_SCORE
-	var alpha: int = -INF_SCORE
 	var beta: int = INF_SCORE
+	var has_best: bool = false
 	var slice_start_usec := Time.get_ticks_usec()
 
 	for mv in legal_moves:
@@ -94,26 +95,40 @@ func choose_move_async(
 			await tree.process_frame
 			slice_start_usec = Time.get_ticks_usec()
 
+		var search_alpha: int = -INF_SCORE
+		if has_best:
+			if jitter_range > 0 and absi(best_raw_score) < MATE_SCORE - 100:
+				search_alpha = best_raw_score - jitter_range
+			else:
+				search_alpha = best_raw_score
+
 		var undo := state.push_search_move(mv)
-		var score := -_negamax(
+		var raw_score := -_negamax(
 			state,
 			max_depth - 1,
 			-beta,
-			-alpha,
+			-search_alpha,
 			state.current_turn,
 			1,
 			use_quiescence
 		)
 		state.pop_search_move(undo)
 
-		if jitter_range > 0 and absi(score) < MATE_SCORE - 100:
-			score += _rng.randi_range(-jitter_range, jitter_range)
+		# Fail-low cutoffs return an upper bound <= search_alpha; never jitter them above best_move
+		if has_best and raw_score <= search_alpha:
+			continue
 
-		if score > best_score:
+		if not has_best or raw_score > best_raw_score:
+			best_raw_score = raw_score
+
+		var score := raw_score
+		if jitter_range > 0 and absi(raw_score) < MATE_SCORE - 100:
+			score += _rng.randi_range(0, jitter_range)
+
+		if not has_best or score > best_score:
 			best_score = score
 			best_move = mv
-		if score > alpha:
-			alpha = score
+			has_best = true
 
 	return best_move
 
@@ -162,32 +177,47 @@ func _choose_search_move(
 	_order_moves(state, legal_moves)
 
 	var best_move: GameRules.VectorMove = legal_moves[0]
+	var best_raw_score: int = -INF_SCORE
 	var best_score: int = -INF_SCORE
-	var alpha: int = -INF_SCORE
 	var beta: int = INF_SCORE
+	var has_best: bool = false
 
 	for mv in legal_moves:
+		var search_alpha: int = -INF_SCORE
+		if has_best:
+			if jitter_range > 0 and absi(best_raw_score) < MATE_SCORE - 100:
+				search_alpha = best_raw_score - jitter_range
+			else:
+				search_alpha = best_raw_score
+
 		var undo := state.push_search_move(mv)
-		var score := -_negamax(
+		var raw_score := -_negamax(
 			state,
 			max_depth - 1,
 			-beta,
-			-alpha,
+			-search_alpha,
 			state.current_turn,
 			1,
 			use_quiescence
 		)
 		state.pop_search_move(undo)
 
-		# Small tie-breaking jitter among near-equal moves so games stay varied
-		if jitter_range > 0 and absi(score) < MATE_SCORE - 100:
-			score += _rng.randi_range(-jitter_range, jitter_range)
+		# Fail-low cutoffs return an upper bound <= search_alpha; never jitter them above best_move
+		if has_best and raw_score <= search_alpha:
+			continue
 
-		if score > best_score:
+		if not has_best or raw_score > best_raw_score:
+			best_raw_score = raw_score
+
+		# Small tie-breaking jitter among near-equal moves so games stay varied
+		var score := raw_score
+		if jitter_range > 0 and absi(raw_score) < MATE_SCORE - 100:
+			score += _rng.randi_range(0, jitter_range)
+
+		if not has_best or score > best_score:
 			best_score = score
 			best_move = mv
-		if score > alpha:
-			alpha = score
+			has_best = true
 
 	return best_move
 
