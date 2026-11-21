@@ -6,6 +6,7 @@ extends Control
 
 signal move_executed(move: GameRules.VectorMove, notation: String)
 signal promotion_requested(pending_move: GameRules.VectorMove, team: PieceData.Team)
+signal promotion_canceled
 signal selection_changed(piece: PieceData, hovered_move: GameRules.VectorMove)
 
 const SQRT3: float = 1.73205080757
@@ -24,6 +25,7 @@ const COLOR_VECTOR_RAY := Color(0.25, 1.0, 0.65, 0.85)
 const COLOR_CAPTURE_RAY := Color(1.0, 0.32, 0.25, 0.95)
 const COLOR_LAST_MOVE := Color(1.0, 0.82, 0.2, 0.70)
 const COLOR_CHECK_VECTOR := Color(1.0, 0.55, 0.0, 0.95)
+const COLOR_PROMOTION_PENDING := Color(1.0, 0.84, 0.30, 1.0)
 
 const ATLAS_CELL_SIZE: int = 128
 const ATLAS_COLS: int = 6
@@ -322,7 +324,8 @@ func start_new_game() -> void:
 
 
 func undo_move() -> bool:
-	pending_promotion_move = null
+	if pending_promotion_move != null:
+		cancel_pending_promotion()
 	if rules.undo_last_move():
 		selected_piece = null
 		legal_moves = []
@@ -361,6 +364,16 @@ func complete_promotion(chosen_type: PieceData.Type) -> void:
 	_commit_move(mv)
 
 
+func cancel_pending_promotion() -> bool:
+	if pending_promotion_move == null:
+		return false
+	pending_promotion_move = null
+	hovered_cell = GameRules.INVALID_HEX
+	_clear_selection()
+	promotion_canceled.emit()
+	return true
+
+
 func _on_mouse_exited() -> void:
 	_clear_hover()
 
@@ -387,7 +400,16 @@ func _gui_input(event: InputEvent) -> void:
 		_clear_hover()
 		return
 
-	if pending_promotion_move != null or input_locked:
+	if input_locked:
+		return
+
+	if pending_promotion_move != null:
+		if (
+			event is InputEventMouseButton
+			and event.pressed
+			and (event.button_index == MOUSE_BUTTON_LEFT or event.button_index == MOUSE_BUTTON_RIGHT)
+		):
+			cancel_pending_promotion()
 		return
 
 	if event is InputEventMouseMotion:
@@ -407,6 +429,10 @@ func _gui_input(event: InputEvent) -> void:
 
 
 func _handle_cell_interaction(cell: Vector2i) -> void:
+	if pending_promotion_move != null:
+		cancel_pending_promotion()
+		return
+
 	if not GameRules.is_inside_board(cell) or rules.is_game_over:
 		_clear_selection()
 		return
@@ -416,7 +442,9 @@ func _handle_cell_interaction(cell: Vector2i) -> void:
 			if mv.to == cell:
 				if mv.is_promotion:
 					pending_promotion_move = mv
+					_clear_hover()
 					promotion_requested.emit(mv, selected_piece.team)
+					queue_redraw()
 				else:
 					_commit_move(mv)
 				return
@@ -565,8 +593,17 @@ func _draw() -> void:
 				var arrow_label := format_vector_delta_label(mv.delta) if is_hovered else ""
 				_draw_vector_arrow(origin, dest, Color(col, alpha), width, arrow_label)
 
-	# 6. Hover cursor hex outline
-	if GameRules.is_inside_board(hovered_cell):
+	if pending_promotion_move != null:
+		var promo_center := _axial_to_screen(Vector2(pending_promotion_move.to))
+		_draw_hex_highlight(
+			promo_center,
+			Color(COLOR_PROMOTION_PENDING, 0.28),
+			Color(COLOR_PROMOTION_PENDING, 0.95),
+			2.6
+		)
+
+	# 6. Hover cursor hex outline (suppressed while promotion highlight is active)
+	if pending_promotion_move == null and GameRules.is_inside_board(hovered_cell):
 		var h_center := _axial_to_screen(Vector2(hovered_cell))
 		_draw_hex_highlight(h_center, COLOR_HOVER_FILL, COLOR_HOVER_BORDER, 1.6)
 
