@@ -7,4 +7,5 @@
 		"DepotPath" "VectorChess.app"
 		"recursive" "1"
 	}
+	"FileExclusion" "._*"
 }
