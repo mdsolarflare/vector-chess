@@ -1,0 +1,274 @@
+name: Setup Official Godot Engine
+description: >-
+  Download, SHA-512 verify, and atomically install official Godot Engine
+  binaries and optional export templates directly from godotengine GitHub Releases.
+
+inputs:
+  version:
+    description: "Godot Engine version (e.g. 4.7.2)"
+    required: false
+    default: "4.7.2"
+  release-type:
+    description: "Godot release flavor (e.g. stable)"
+    required: false
+    default: "stable"
+  templates:
+    description: "Export templates subset to install (none, web, desktop-android, apple, all)"
+    required: false
+    default: "none"
+
+outputs:
+  godot-bin:
+    description: "Absolute path to the installed Godot executable"
+    value: ${{ steps.install.outputs.godot-bin }}
+  templates-dir:
+    description: "Path to the Godot export templates directory (empty when templates=none)"
+    value: ${{ steps.install.outputs.templates-dir }}
+  version:
+    description: "Resolved Godot version"
+    value: ${{ steps.install.outputs.version }}
+  release-type:
+    description: "Resolved Godot release type"
+    value: ${{ steps.install.outputs.release-type }}
+  minor-version:
+    description: "Godot major.minor version (e.g. 4.7) for editor_settings filenames"
+    value: ${{ steps.install.outputs.minor-version }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install & Verify Official Godot Binary and Templates
+      id: install
+      shell: bash
+      env:
+        GODOT_VERSION: ${{ inputs.version }}
+        RELEASE_TYPE: ${{ inputs.release-type }}
+        TEMPLATES_MODE: ${{ inputs.templates }}
+        RUNNER_OS_NAME: ${{ runner.os }}
+        RUNNER_ARCH_NAME: ${{ runner.arch }}
+      run: |
+        set -euo pipefail
+
+        if [[ ! "${GODOT_VERSION}" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
+          echo "::error::Invalid Godot version '${GODOT_VERSION}'."
+          exit 1
+        fi
+        if [[ ! "${RELEASE_TYPE}" =~ ^[0-9A-Za-z._-]+$ ]]; then
+          echo "::error::Invalid Godot release-type '${RELEASE_TYPE}'."
+          exit 1
+        fi
+        case "${TEMPLATES_MODE}" in
+          none|web|desktop-android|apple|all) ;;
+          *)
+            echo "::error::Invalid templates mode '${TEMPLATES_MODE}'. Expected one of: none, web, desktop-android, apple, all."
+            exit 1
+            ;;
+        esac
+
+        if [ "${RELEASE_TYPE}" = "stable" ]; then
+          RELEASE_REPO="godotengine/godot"
+        else
+          RELEASE_REPO="godotengine/godot-builds"
+        fi
+        BASE_URL="https://github.com/${RELEASE_REPO}/releases/download/${GODOT_VERSION}-${RELEASE_TYPE}"
+
+        TMP_ROOT="${RUNNER_TEMP:-/tmp}"
+        TMP_WORK=$(mktemp -d "${TMP_ROOT}/setup-godot.XXXXXX")
+        STAGE_BIN=""
+        STAGE_TPL=""
+        cleanup() {
+          rm -rf "${TMP_WORK}"
+          if [ -n "${STAGE_BIN}" ]; then
+            rm -rf "${STAGE_BIN}"
+          fi
+          if [ -n "${STAGE_TPL}" ]; then
+            rm -rf "${STAGE_TPL}"
+          fi
+        }
+        trap cleanup EXIT
+
+        ensure_checksums() {
+          if [ ! -f "${TMP_WORK}/SHA512-SUMS.txt" ]; then
+            curl -fsSL --retry 3 --retry-delay 2 \
+              "${BASE_URL}/SHA512-SUMS.txt" \
+              -o "${TMP_WORK}/SHA512-SUMS.txt"
+          fi
+        }
+
+        verify_sha512() {
+          local archive_path="$1"
+          local expected_name="$2"
+          ensure_checksums
+          python3 - "${TMP_WORK}/SHA512-SUMS.txt" "${archive_path}" "${expected_name}" <<'PY'
+        import hashlib, pathlib, sys
+
+        sums_path, archive_path, expected_name = sys.argv[1:4]
+        expected_hash = None
+        for raw_line in pathlib.Path(sums_path).read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            parts = line.split(None, 1)
+            if len(parts) != 2:
+                continue
+            digest, filename = parts[0].lower(), parts[1].lstrip("*").strip()
+            if filename == expected_name:
+                expected_hash = digest
+                break
+
+        if not expected_hash or len(expected_hash) != 128:
+            raise SystemExit(f"Could not find SHA-512 entry for '{expected_name}' in {sums_path}")
+
+        h = hashlib.sha512()
+        with open(archive_path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                h.update(chunk)
+        actual_hash = h.hexdigest().lower()
+        if actual_hash != expected_hash:
+            raise SystemExit(
+                f"SHA-512 mismatch for '{expected_name}': expected {expected_hash}, got {actual_hash}"
+            )
+        print(f"Verified SHA-512 for {expected_name}: {actual_hash[:16]}...")
+        PY
+        }
+
+        case "${RUNNER_OS_NAME}" in
+          Linux)
+            case "${RUNNER_ARCH_NAME}" in
+              X64) LINUX_ARCH="x86_64" ;;
+              ARM64) LINUX_ARCH="arm64" ;;
+              *)
+                echo "::error::Unsupported Linux runner architecture '${RUNNER_ARCH_NAME}'."
+                exit 1
+                ;;
+            esac
+            CACHE_PARENT="$HOME/.cache/godot"
+            GODOT_DIR="${CACHE_PARENT}/${GODOT_VERSION}-${RELEASE_TYPE}-${LINUX_ARCH}"
+            GODOT_BIN="${GODOT_DIR}/godot"
+            ZIP_NAME="Godot_v${GODOT_VERSION}-${RELEASE_TYPE}_linux.${LINUX_ARCH}.zip"
+            if [ ! -f "${GODOT_DIR}/.binary.ok" ] || [ ! -x "${GODOT_BIN}" ]; then
+              mkdir -p "${CACHE_PARENT}"
+              STAGE_BIN=$(mktemp -d "${CACHE_PARENT}/.stage.XXXXXX")
+              curl -fsSL --retry 3 --retry-delay 2 "${BASE_URL}/${ZIP_NAME}" -o "${TMP_WORK}/${ZIP_NAME}"
+              verify_sha512 "${TMP_WORK}/${ZIP_NAME}" "${ZIP_NAME}"
+              unzip -q -o "${TMP_WORK}/${ZIP_NAME}" -d "${STAGE_BIN}"
+              mv -f "${STAGE_BIN}/Godot_v${GODOT_VERSION}-${RELEASE_TYPE}_linux.${LINUX_ARCH}" "${STAGE_BIN}/godot"
+              chmod +x "${STAGE_BIN}/godot"
+              : > "${STAGE_BIN}/.binary.ok"
+              rm -rf "${GODOT_DIR}"
+              mv "${STAGE_BIN}" "${GODOT_DIR}"
+              STAGE_BIN=""
+              rm -f "${TMP_WORK}/${ZIP_NAME}"
+            fi
+            echo "${GODOT_DIR}" >> "$GITHUB_PATH"
+            TEMPLATE_PARENT="$HOME/.local/share/godot/export_templates"
+            TEMPLATE_DIR="${TEMPLATE_PARENT}/${GODOT_VERSION}.${RELEASE_TYPE}"
+            ;;
+          macOS)
+            CACHE_PARENT="$HOME/.cache/godot-macos"
+            GODOT_DIR="${CACHE_PARENT}/${GODOT_VERSION}-${RELEASE_TYPE}"
+            GODOT_BIN="${GODOT_DIR}/Godot.app/Contents/MacOS/Godot"
+            ZIP_NAME="Godot_v${GODOT_VERSION}-${RELEASE_TYPE}_macos.universal.zip"
+            if [ ! -f "${GODOT_DIR}/.binary.ok" ] || [ ! -x "${GODOT_BIN}" ] || [ ! -x "${GODOT_DIR}/bin/godot" ]; then
+              mkdir -p "${CACHE_PARENT}"
+              STAGE_BIN=$(mktemp -d "${CACHE_PARENT}/.stage.XXXXXX")
+              curl -fsSL --retry 3 --retry-delay 2 "${BASE_URL}/${ZIP_NAME}" -o "${TMP_WORK}/${ZIP_NAME}"
+              verify_sha512 "${TMP_WORK}/${ZIP_NAME}" "${ZIP_NAME}"
+              unzip -q -o "${TMP_WORK}/${ZIP_NAME}" -d "${STAGE_BIN}"
+              mkdir -p "${STAGE_BIN}/bin"
+              ln -sf "../Godot.app/Contents/MacOS/Godot" "${STAGE_BIN}/bin/godot"
+              : > "${STAGE_BIN}/.binary.ok"
+              rm -rf "${GODOT_DIR}"
+              mv "${STAGE_BIN}" "${GODOT_DIR}"
+              STAGE_BIN=""
+              rm -f "${TMP_WORK}/${ZIP_NAME}"
+            fi
+            echo "${GODOT_DIR}/bin" >> "$GITHUB_PATH"
+            TEMPLATE_PARENT="$HOME/Library/Application Support/Godot/export_templates"
+            TEMPLATE_DIR="${TEMPLATE_PARENT}/${GODOT_VERSION}.${RELEASE_TYPE}"
+            ;;
+          *)
+            echo "::error::Unsupported runner OS '${RUNNER_OS_NAME}'."
+            exit 1
+            ;;
+        esac
+
+        "${GODOT_BIN}" --version
+
+        templates_ready() {
+          local dir="$1"
+          case "${TEMPLATES_MODE}" in
+            web)
+              ( [ -f "${dir}/.templates-web.ok" ] || [ -f "${dir}/.templates-all.ok" ] ) \
+                && [ -f "${dir}/version.txt" ] \
+                && [ -f "${dir}/web_nothreads_release.zip" ]
+              ;;
+            desktop-android)
+              [ -f "${dir}/.templates-all.ok" ] \
+                && [ -f "${dir}/version.txt" ] \
+                && [ -f "${dir}/android_source.zip" ] \
+                && [ -f "${dir}/android_release.apk" ] \
+                && [ -f "${dir}/linux_release.x86_64" ] \
+                && [ -f "${dir}/windows_release_x86_64.exe" ]
+              ;;
+            apple)
+              [ -f "${dir}/.templates-all.ok" ] \
+                && [ -f "${dir}/version.txt" ] \
+                && [ -f "${dir}/macos.zip" ] \
+                && [ -f "${dir}/ios.zip" ]
+              ;;
+            all)
+              [ -f "${dir}/.templates-all.ok" ] \
+                && [ -f "${dir}/version.txt" ] \
+                && [ -f "${dir}/web_nothreads_release.zip" ] \
+                && [ -f "${dir}/android_source.zip" ] \
+                && [ -f "${dir}/android_release.apk" ] \
+                && [ -f "${dir}/linux_release.x86_64" ] \
+                && [ -f "${dir}/windows_release_x86_64.exe" ] \
+                && [ -f "${dir}/macos.zip" ] \
+                && [ -f "${dir}/ios.zip" ]
+              ;;
+            *)
+              return 0
+              ;;
+          esac
+        }
+
+        RESOLVED_TEMPLATES_DIR=""
+        if [ "${TEMPLATES_MODE}" != "none" ]; then
+          if ! templates_ready "${TEMPLATE_DIR}"; then
+            TPZ_NAME="Godot_v${GODOT_VERSION}-${RELEASE_TYPE}_export_templates.tpz"
+            mkdir -p "${TEMPLATE_PARENT}"
+            STAGE_TPL=$(mktemp -d "${TEMPLATE_PARENT}/.stage.XXXXXX")
+            curl -fsSL --retry 3 --retry-delay 2 "${BASE_URL}/${TPZ_NAME}" -o "${TMP_WORK}/${TPZ_NAME}"
+            verify_sha512 "${TMP_WORK}/${TPZ_NAME}" "${TPZ_NAME}"
+            if [ "${TEMPLATES_MODE}" = "web" ]; then
+              unzip -j -q -o "${TMP_WORK}/${TPZ_NAME}" 'templates/web_*.zip' 'templates/version.txt' -d "${STAGE_TPL}"
+              : > "${STAGE_TPL}/.templates-web.ok"
+            else
+              mkdir -p "${TMP_WORK}/godot_templates"
+              unzip -q -o "${TMP_WORK}/${TPZ_NAME}" -d "${TMP_WORK}/godot_templates"
+              cp -Rf "${TMP_WORK}/godot_templates/templates"/. "${STAGE_TPL}/"
+              rm -rf "${TMP_WORK}/godot_templates"
+              : > "${STAGE_TPL}/.templates-all.ok"
+            fi
+            rm -f "${TMP_WORK}/${TPZ_NAME}"
+            if ! templates_ready "${STAGE_TPL}"; then
+              echo "::error::Expected Godot export templates for mode '${TEMPLATES_MODE}' were not found after extraction."
+              exit 1
+            fi
+            rm -rf "${TEMPLATE_DIR}"
+            mv "${STAGE_TPL}" "${TEMPLATE_DIR}"
+            STAGE_TPL=""
+          fi
+          RESOLVED_TEMPLATES_DIR="${TEMPLATE_DIR}"
+        fi
+
+        GODOT_MINOR=$(printf '%s' "${GODOT_VERSION}" | cut -d. -f1,2)
+        {
+          echo "godot-bin=${GODOT_BIN}"
+          echo "templates-dir=${RESOLVED_TEMPLATES_DIR}"
+          echo "version=${GODOT_VERSION}"
+          echo "release-type=${RELEASE_TYPE}"
+          echo "minor-version=${GODOT_MINOR}"
+        } >> "$GITHUB_OUTPUT"
