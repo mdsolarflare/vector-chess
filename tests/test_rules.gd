@@ -36,6 +36,10 @@ func _run_all_tests() -> void:
 	await _test_ai_player_async_move_selection()
 	_test_software_renderer_detection()
 	_test_vector_board_caching_and_idle_redraw()
+	await _test_vector_board_atlas_and_aa_isolation()
+	_test_hover_exit_and_touch_release_clearing()
+	await _test_vector_arrow_label_centering_and_draw()
+	_test_hex_tile_color_variation()
 	_test_mobile_scaling_and_responsive_layout()
 
 	print("========================================")
@@ -834,8 +838,12 @@ func _test_vector_board_caching_and_idle_redraw() -> void:
 	_assert(
 		board._piece_atlas_viewport != null
 		and board._piece_atlas_viewport.size == Vector2i(768, 512)
-		and VectorBoard._piece_atlas_texture != null,
-		"VectorBoard initializes 768x512 PieceAtlasViewport and shared _piece_atlas_texture"
+		and board._piece_atlas_texture != null,
+		"VectorBoard initializes per-instance 768x512 PieceAtlasViewport and _piece_atlas_texture"
+	)
+	_assert(
+		board.get_piece_atlas_texture() == null,
+		"Off-tree VectorBoard.get_piece_atlas_texture() returns null until SubViewport enters SceneTree"
 	)
 	_assert(
 		board._cached_turn_moves.size() == 18,
@@ -921,6 +929,401 @@ func _test_vector_board_caching_and_idle_redraw() -> void:
 		"VectorBoard is_animating() is true while moved piece interpolates to target hex"
 	)
 	board.free()
+
+
+func _test_vector_board_atlas_and_aa_isolation() -> void:
+	print("\n-- VectorBoard Per-Instance Atlas Lifecycle & Line AA Isolation (Issue #37) --")
+	# 1. Freeing an off-tree VectorBoard after _setup_piece_atlas() leaves no stale global atlas
+	#    and draw_faceted_piece_icon() safely falls back to ArrayMesh rendering.
+	var off_tree := VectorBoard.new()
+	off_tree._setup_piece_atlas()
+	var off_tree_vp := off_tree._piece_atlas_viewport
+	off_tree.free()
+	_assert(
+		not is_instance_valid(off_tree_vp),
+		"Freeing off-tree VectorBoard frees its owned PieceAtlasViewport cleanly"
+	)
+
+	var tiny_img := Image.create_empty(16, 16, false, Image.FORMAT_RGBA8)
+	var tiny_tex := ImageTexture.create_from_image(tiny_img)
+	_assert(
+		not VectorBoard._is_valid_atlas_texture(null) and not VectorBoard._is_valid_atlas_texture(tiny_tex),
+		"_is_valid_atlas_texture rejects null and undersized textures"
+	)
+
+	# 2. Multi-instance isolation: two VectorBoard instances own independent atlases and AA flags
+	var board_a := VectorBoard.new()
+	var board_b := VectorBoard.new()
+	root.add_child(board_a)
+	root.add_child(board_b)
+
+	var tex_a := board_a.get_piece_atlas_texture()
+	var tex_b := board_b.get_piece_atlas_texture()
+	_assert(
+		tex_a != null
+		and tex_b != null
+		and tex_a != tex_b
+		and VectorBoard._is_valid_atlas_texture(tex_a),
+		"Two in-tree VectorBoard instances own distinct valid atlas textures"
+	)
+
+	board_a.set_line_antialiasing(false)
+	_assert(
+		not board_a.line_aa_enabled and board_b.line_aa_enabled,
+		"Disabling line_aa_enabled on one VectorBoard does not mutate another instance"
+	)
+
+	# Freeing board_b must not clobber board_a's atlas texture; detached tex_b must be rejected
+	board_b.free()
+	_assert(
+		board_a.get_piece_atlas_texture() == tex_a and is_instance_valid(board_a._piece_atlas_viewport),
+		"Freeing a second VectorBoard leaves the first VectorBoard's atlas texture intact"
+	)
+	_assert(
+		not VectorBoard._is_valid_atlas_texture(tex_b),
+		"Detached ViewportTexture from a freed VectorBoard is rejected by _is_valid_atlas_texture()"
+	)
+
+	# Verify draw_faceted_piece_icon safely falls back to ArrayMesh for both null and detached ViewportTexture
+	var fallback_drawn := [false]
+	var canvas := Control.new()
+	canvas.size = Vector2(64, 64)
+	canvas.draw.connect(func() -> void:
+		VectorBoard.draw_faceted_piece_icon(
+			canvas,
+			PieceData.Type.QUEEN,
+			PieceData.Team.CYAN,
+			Vector2(20, 32),
+			14.0,
+			false
+		)
+		VectorBoard.draw_faceted_piece_icon(
+			canvas,
+			PieceData.Type.ROOK,
+			PieceData.Team.MAGENTA,
+			Vector2(44, 32),
+			14.0,
+			true,
+			tex_b
+		)
+		fallback_drawn[0] = true
+	)
+	root.add_child(canvas)
+	canvas.queue_redraw()
+	await process_frame
+	await process_frame
+	_assert(
+		fallback_drawn[0],
+		"draw_faceted_piece_icon() safely falls back to ArrayMesh rendering for null and detached ViewportTextures"
+	)
+	canvas.free()
+
+	# Removing board_a from tree hides its atlas texture; re-adding restores atlas AND re-arms background SubViewport
+	board_a._bg_viewport.render_target_update_mode = SubViewport.UPDATE_DISABLED
+	root.remove_child(board_a)
+	_assert(
+		board_a.get_piece_atlas_texture() == null,
+		"Removing VectorBoard from SceneTree returns null from get_piece_atlas_texture()"
+	)
+	root.add_child(board_a)
+	_assert(
+		board_a.get_piece_atlas_texture() != null
+		and board_a._bg_viewport.render_target_update_mode == SubViewport.UPDATE_ONCE
+		and board_a._piece_atlas_viewport.render_target_update_mode == SubViewport.UPDATE_ONCE,
+		"Re-adding VectorBoard to SceneTree restores atlas texture and re-arms both SubViewports (UPDATE_ONCE)"
+	)
+
+	# Verify Main._apply_software_renderer_fallback() only disables AA on its own board instance
+	var main_ui: Control = MainScene.instantiate()
+	root.add_child(main_ui)
+	board_a.set_line_antialiasing(true)
+	main_ui._apply_software_renderer_fallback("SwiftShader")
+	_assert(
+		not main_ui.vector_board.line_aa_enabled
+		and not main_ui._is_line_aa_enabled()
+		and board_a.line_aa_enabled,
+		"Main._apply_software_renderer_fallback() disables line AA on its VectorBoard without affecting other instances"
+	)
+	main_ui.free()
+	board_a.free()
+
+
+func _test_hover_exit_and_touch_release_clearing() -> void:
+	print("\n-- Hover Clear on mouse_exited, Touch Release & State Transitions (Issue #42) --")
+	var board := VectorBoard.new()
+	board.size = Vector2(800, 600)
+	root.add_child(board)
+	board._compute_board_metrics()
+
+	var f5 := GameRules.algebraic_to_axial("f5")
+	var f6 := GameRules.algebraic_to_axial("f6")
+	board._handle_cell_interaction(f5)
+	_assert(
+		board.selected_piece != null and board.legal_moves.size() == 1 and board.legal_moves[0].to == f6,
+		"Setup: f5 pawn selected with legal target f6"
+	)
+
+	# Desktop mouse motion over f6 sets hovered_cell and hovered_move
+	var motion := InputEventMouseMotion.new()
+	motion.device = 0
+	motion.position = board._axial_to_screen(Vector2(f6))
+	board._gui_input(motion)
+	_assert(
+		board.hovered_cell == f6 and board.hovered_move != null and board.hovered_move.to == f6,
+		"Mouse motion over f6 sets hovered_cell and hovered_move"
+	)
+
+	# mouse_exited clears hovered_cell, clears hovered_move, and emits selection_changed
+	var signal_events: Array = []
+	var on_sel := func(piece: PieceData, mv: GameRules.VectorMove) -> void:
+		signal_events.append({"piece": piece, "move": mv})
+	board.selection_changed.connect(on_sel)
+	board.mouse_exited.emit()
+	_assert(
+		board.hovered_cell == GameRules.INVALID_HEX
+		and board.hovered_move == null
+		and signal_events.size() == 1
+		and signal_events[0]["piece"] == board.selected_piece
+		and signal_events[0]["move"] == null,
+		"mouse_exited resets hovered_cell to INVALID_HEX, clears hovered_move, and emits selection_changed"
+	)
+
+	# Calling _on_mouse_exited again when already cleared is a no-op
+	board.mouse_exited.emit()
+	_assert(
+		signal_events.size() == 1,
+		"Repeated mouse_exited when already cleared does not emit redundant selection_changed"
+	)
+
+	# Desktop mouse-emulated touch release (DEVICE_ID_EMULATION) must NOT wipe real desktop hover
+	board._gui_input(motion)
+	var emu_touch_up := InputEventScreenTouch.new()
+	emu_touch_up.device = InputEvent.DEVICE_ID_EMULATION
+	emu_touch_up.pressed = false
+	board._gui_input(emu_touch_up)
+	_assert(
+		board.hovered_cell == f6 and board.hovered_move != null,
+		"Mouse-emulated InputEventScreenTouch release preserves desktop mouse hover"
+	)
+
+	# Real touchscreen release (device != DEVICE_ID_EMULATION) clears hover
+	var real_touch_up := InputEventScreenTouch.new()
+	real_touch_up.device = 0
+	real_touch_up.pressed = false
+	board._gui_input(real_touch_up)
+	_assert(
+		board.hovered_cell == GameRules.INVALID_HEX and board.hovered_move == null,
+		"Real InputEventScreenTouch release clears hovered_cell and hovered_move"
+	)
+
+	# Hybrid touchscreen laptop: stale desktop hover on f6, then touch-emulated tap on f5
+	# must clear hover BEFORE selecting f5 so only ONE clean selection_changed(f5_pawn, null) fires.
+	board._clear_selection()
+	board._gui_input(motion)
+	signal_events.clear()
+	var emu_tap_down := InputEventMouseButton.new()
+	emu_tap_down.device = InputEvent.DEVICE_ID_EMULATION
+	emu_tap_down.button_index = MOUSE_BUTTON_LEFT
+	emu_tap_down.pressed = true
+	emu_tap_down.position = board._axial_to_screen(Vector2(f5))
+	board._gui_input(emu_tap_down)
+	var emu_tap_up := InputEventMouseButton.new()
+	emu_tap_up.device = InputEvent.DEVICE_ID_EMULATION
+	emu_tap_up.button_index = MOUSE_BUTTON_LEFT
+	emu_tap_up.pressed = false
+	emu_tap_up.position = board._axial_to_screen(Vector2(f5))
+	board._gui_input(emu_tap_up)
+	_assert(
+		board.selected_piece != null
+		and board.hovered_cell == GameRules.INVALID_HEX
+		and board.hovered_move == null
+		and signal_events.size() == 1
+		and signal_events[0]["piece"] == board.selected_piece
+		and signal_events[0]["move"] == null,
+		"Touch-emulated tap over stale desktop hover emits single clean selection_changed(piece, null)"
+	)
+
+	# Touch-emulated mouse motion & touch release clear hover even when input_locked == true
+	board._gui_input(motion)
+	board.input_locked = true
+	_assert(
+		board.hovered_cell == GameRules.INVALID_HEX and board.hovered_move == null,
+		"Setting input_locked = true clears stale hover highlight immediately"
+	)
+	board.hovered_cell = f6
+	var emu_motion_locked := InputEventMouseMotion.new()
+	emu_motion_locked.device = InputEvent.DEVICE_ID_EMULATION
+	emu_motion_locked.position = board._axial_to_screen(Vector2(f6))
+	board._gui_input(emu_motion_locked)
+	_assert(
+		board.hovered_cell == GameRules.INVALID_HEX,
+		"Touch-emulated motion clears stale hover even while input_locked is true"
+	)
+	board.input_locked = false
+
+	# State transitions: board_flipped, undo_move, start_new_game, and _exit_tree clear hovered_cell
+	board._gui_input(motion)
+	board.board_flipped = true
+	_assert(
+		board.hovered_cell == GameRules.INVALID_HEX and board.hovered_move == null,
+		"Flipping board clears stale hovered_cell and hovered_move"
+	)
+	board.board_flipped = false
+
+	board._handle_cell_interaction(f5)
+	board._commit_move(board.legal_moves[0])
+	board.hovered_cell = f6
+	board.undo_move()
+	_assert(
+		board.hovered_cell == GameRules.INVALID_HEX,
+		"undo_move() resets hovered_cell to INVALID_HEX"
+	)
+	board.hovered_cell = f6
+	board.start_new_game()
+	_assert(
+		board.hovered_cell == GameRules.INVALID_HEX,
+		"start_new_game() resets hovered_cell to INVALID_HEX"
+	)
+
+	# Moving cursor into out-of-board padding normalizes hovered_cell to INVALID_HEX
+	board._handle_cell_interaction(f5)
+	board._gui_input(motion)
+	var oob_motion := InputEventMouseMotion.new()
+	oob_motion.device = 0
+	oob_motion.position = Vector2(2.0, 2.0)
+	board._gui_input(oob_motion)
+	_assert(
+		board.hovered_cell == GameRules.INVALID_HEX and board.hovered_move == null,
+		"Moving cursor off the hex grid into empty board padding resets hovered_cell to INVALID_HEX"
+	)
+
+	# Main HUD integration: mouse_exited clears "Target:" hovered-move telemetry in SidePanel
+	var main_ui: Control = MainScene.instantiate()
+	root.add_child(main_ui)
+	main_ui.vector_board.size = Vector2(800, 600)
+	main_ui.vector_board._compute_board_metrics()
+	main_ui.vector_board._handle_cell_interaction(f5)
+	var main_motion := InputEventMouseMotion.new()
+	main_motion.device = 0
+	main_motion.position = main_ui.vector_board._axial_to_screen(Vector2(f6))
+	main_ui.vector_board._gui_input(main_motion)
+	var had_target: bool = main_ui.telemetry_label.text.contains("Target:")
+	main_ui.vector_board.mouse_exited.emit()
+	var cleared_target: bool = not main_ui.telemetry_label.text.contains("Target:")
+	_assert(
+		had_target and cleared_target,
+		"Main HUD telemetry clears hovered 'Target:' readout when cursor exits VectorBoard"
+	)
+	main_ui.free()
+	board.free()
+
+
+func _test_vector_arrow_label_centering_and_draw() -> void:
+	print("\n-- Vector Arrow Label Centering & Animation-Safe Delta (Issue #43) --")
+	_assert(
+		VectorBoard.format_vector_delta_label(Vector2i(1, -2)) == "d(+1,-2)"
+		and VectorBoard.format_vector_delta_label(Vector2i(0, -1)) == "d(+0,-1)",
+		"format_vector_delta_label formats axial move deltas directly with explicit signs"
+	)
+
+	var font := ThemeDB.fallback_font
+	_assert(font != null, "ThemeDB.fallback_font is available for label centering calculations")
+	if font != null:
+		var label := VectorBoard.format_vector_delta_label(Vector2i(1, -2))
+		var anchor := Vector2(200.0, 150.0)
+		var expected_w := font.get_string_size(label, HORIZONTAL_ALIGNMENT_LEFT, -1, 11).x
+		var expected_y := anchor.y + (font.get_ascent(11) - font.get_descent(11)) * 0.5
+		var centered_pos := VectorBoard.compute_centered_label_pos(anchor, font, label, 11)
+		_assert(
+			expected_w > 0.0
+			and is_equal_approx(centered_pos.x, anchor.x - expected_w * 0.5)
+			and centered_pos.x < anchor.x
+			and is_equal_approx(centered_pos.y, expected_y)
+			and centered_pos.y > anchor.y,
+			"compute_centered_label_pos centers text horizontally (-%.1fpx) and vertically by baseline offset" % (expected_w * 0.5)
+		)
+
+	# Verify _draw() renders hovered vector arrow cleanly (normal and flipped) even while
+	# selected_piece.visual_pos is shifted >1 full hex away from grid_pos (where _screen_to_axial would disagree).
+	var board := VectorBoard.new()
+	board.size = Vector2(800, 600)
+	board.show_vectors = true
+	root.add_child(board)
+	board._compute_board_metrics()
+	var f5 := GameRules.algebraic_to_axial("f5")
+	var f6 := GameRules.algebraic_to_axial("f6")
+	board._handle_cell_interaction(f5)
+	board.selected_piece.visual_pos = Vector2(f5) + Vector2(1.4, -1.2)
+	board.hovered_cell = f6
+	board._update_hovered_move()
+	var screen_roundtrip_delta := (
+		board._screen_to_axial(board._axial_to_screen(Vector2(f6)))
+		- board._screen_to_axial(board._axial_to_screen(board.selected_piece.visual_pos))
+	)
+	board.queue_redraw()
+	await process_frame
+	await process_frame
+	_assert(
+		board.hovered_move != null
+		and screen_roundtrip_delta != board.hovered_move.delta
+		and VectorBoard.format_vector_delta_label(board.hovered_move.delta) == "d(+0,-1)",
+		"Hovered arrow label uses exact mv.delta d(+0,-1) rather than drifted visual_pos round-trip %s" % str(screen_roundtrip_delta)
+	)
+
+	board.board_flipped = true
+	board._handle_cell_interaction(f5)
+	board.hovered_cell = f6
+	board._update_hovered_move()
+	board.queue_redraw()
+	await process_frame
+	await process_frame
+	_assert(
+		board.hovered_move != null and VectorBoard.format_vector_delta_label(board.hovered_move.delta) == "d(+0,-1)",
+		"Flipped board preserves exact mv.delta label rendering during _draw()"
+	)
+	board.free()
+
+
+func _blend_over(fg: Color, bg: Color) -> Color:
+	return Color(
+		bg.r * (1.0 - fg.a) + fg.r * fg.a,
+		bg.g * (1.0 - fg.a) + fg.g * fg.a,
+		bg.b * (1.0 - fg.a) + fg.b * fg.a,
+		1.0
+	)
+
+
+func _test_hex_tile_color_variation() -> void:
+	print("\n-- Hex Tile 3-Color Palette Contrast (Issue #20) --")
+	var l0 := VectorBoard.COLOR_HEX_0.get_luminance()
+	var l1 := VectorBoard.COLOR_HEX_1.get_luminance()
+	var l2 := VectorBoard.COLOR_HEX_2.get_luminance()
+	_assert(
+		l0 < l1 and l1 < l2,
+		"Hex tile shades strictly increase from Dark (%.3f) < Mid (%.3f) < Light (%.3f)" % [l0, l1, l2]
+	)
+	_assert(
+		(l1 - l0) >= 0.09 and (l2 - l1) >= 0.09,
+		"Adjacent hex tile luminance steps are clearly separated (d01=%.3f, d12=%.3f >= 0.090)" % [l1 - l0, l2 - l1]
+	)
+
+	var l_grid_on_light := _blend_over(VectorBoard.COLOR_GRID_LINE, VectorBoard.COLOR_HEX_2).get_luminance()
+	var l_coord_on_light := _blend_over(VectorBoard.COLOR_COORD_LABEL, VectorBoard.COLOR_HEX_2).get_luminance()
+	var l_pawn_on_light := _blend_over(VectorBoard.COLOR_PAWN_START, VectorBoard.COLOR_HEX_2).get_luminance()
+	var l_hover_on_light := _blend_over(VectorBoard.COLOR_HOVER_BORDER, VectorBoard.COLOR_HEX_2).get_luminance()
+	_assert(
+		l_grid_on_light > l2 + 0.10
+		and l_coord_on_light > l2 + 0.30
+		and l_pawn_on_light > l2 + 0.20
+		and l_hover_on_light > l2 + 0.30,
+		"Alpha-blended overlays remain clearly legible over lightest hex shade (grid=%.3f, pawn=%.3f, coord=%.3f, hover=%.3f vs hex2=%.3f)" % [
+			l_grid_on_light,
+			l_pawn_on_light,
+			l_coord_on_light,
+			l_hover_on_light,
+			l2,
+		]
+	)
 
 
 func _test_mobile_scaling_and_responsive_layout() -> void:

@@ -78,6 +78,7 @@ var _is_initial_startup: bool = true
 ## Responsive UI & slider animation state
 var _is_compact_ui: bool = false
 var _slider_anim_time: float = 0.0
+var _line_aa_enabled: bool = true
 
 ## Async AI turn state
 var _ai_thinking: bool = false
@@ -254,6 +255,10 @@ func _detect_mobile_platform(window_size: Vector2i) -> bool:
 	return is_mobile_environment(has_mobile_feat, is_web, is_touch, window_size)
 
 
+func _is_line_aa_enabled() -> bool:
+	return vector_board.line_aa_enabled if is_instance_valid(vector_board) else _line_aa_enabled
+
+
 func _check_browser_gpu() -> void:
 	if OS.has_feature("web"):
 		var adapter := RenderingServer.get_video_adapter_name()
@@ -263,11 +268,26 @@ func _check_browser_gpu() -> void:
 
 func _apply_software_renderer_fallback(adapter: String) -> void:
 	# Drop 2D MSAA and CPU-side polyline anti-aliasing immediately to save CPU fill-rate
-	get_viewport().msaa_2d = Viewport.MSAA_DISABLED
-	if vector_board != null:
+	if is_inside_tree() and get_viewport() != null:
+		get_viewport().msaa_2d = Viewport.MSAA_DISABLED
+	_line_aa_enabled = false
+	if is_instance_valid(vector_board):
 		vector_board.set_line_antialiasing(false)
-	else:
-		VectorBoard.line_aa_enabled = false
+
+	for ctrl in [
+		toggle_panel_button,
+		new_game_button,
+		undo_button,
+		flip_button,
+		vectors_button,
+		confirm_slider,
+		cancel_new_game_button,
+		confirm_new_game_button,
+		color_cyan_button,
+		color_magenta_button,
+	]:
+		if is_instance_valid(ctrl):
+			ctrl.queue_redraw()
 
 	if gpu_warning_label != null:
 		gpu_warning_label.text = (
@@ -454,7 +474,7 @@ func _on_toggle_panel_button_draw() -> void:
 	var icon_h := 15.0 * scale_f
 	var top_left := (s - Vector2(icon_w, icon_h)) * 0.5
 	var rect := Rect2(top_left, Vector2(icon_w, icon_h))
-	var aa := VectorBoard.line_aa_enabled
+	var aa := _is_line_aa_enabled()
 
 	var stroke_col := Color(0.75, 0.88, 1.0, 0.95)
 	var fill_col := Color(0.0, 0.94, 1.0, 0.28)
@@ -503,7 +523,7 @@ func _on_new_game_button_draw() -> void:
 	var r := 12.5
 	var stroke_col := Color(0.82, 0.92, 1.0, 0.95)
 	var fill_col := Color(0.0, 0.94, 1.0, 0.12)
-	var aa := VectorBoard.line_aa_enabled
+	var aa := _is_line_aa_enabled()
 
 	var hex := PackedVector2Array()
 	hex.resize(7)
@@ -526,7 +546,7 @@ func _on_undo_button_draw() -> void:
 	var c := btn.size * 0.5
 	var alpha := 0.32 if btn.disabled else 0.95
 	var col := Color(0.82, 0.92, 1.0, alpha)
-	var aa := VectorBoard.line_aa_enabled
+	var aa := _is_line_aa_enabled()
 
 	var arc_center := c + Vector2(3.5, 1.5)
 	var arc_r := 6.5
@@ -560,7 +580,7 @@ func _on_flip_button_draw() -> void:
 	var flipped := vector_board != null and vector_board.board_flipped
 	var up_col := VectorBoard.COLOR_MAGENTA if flipped else VectorBoard.COLOR_CYAN
 	var down_col := VectorBoard.COLOR_CYAN if flipped else VectorBoard.COLOR_MAGENTA
-	var aa := VectorBoard.line_aa_enabled
+	var aa := _is_line_aa_enabled()
 
 	var lx := c.x - 5.0
 	var top_y := c.y - 9.5
@@ -588,7 +608,7 @@ func _on_vectors_button_draw() -> void:
 	var btn := vectors_button
 	var c := btn.size * 0.5
 	var active := vector_board != null and vector_board.show_vectors
-	var aa := VectorBoard.line_aa_enabled
+	var aa := _is_line_aa_enabled()
 
 	if active:
 		var inner_rect := Rect2(Vector2(3, 3), btn.size - Vector2(6, 6))
@@ -727,7 +747,7 @@ func _draw_team_order_button(
 	var badge_fill_alpha := 0.28 if is_selected else 0.12
 	var badge_stroke_alpha := 1.0 if is_selected else 0.65
 	btn.draw_colored_polygon(hex.slice(0, 6), Color(team_col.r, team_col.g, team_col.b, badge_fill_alpha))
-	btn.draw_polyline(hex, Color(team_col.r, team_col.g, team_col.b, badge_stroke_alpha), 1.8 if is_selected else 1.3, VectorBoard.line_aa_enabled)
+	btn.draw_polyline(hex, Color(team_col.r, team_col.g, team_col.b, badge_stroke_alpha), 1.8 if is_selected else 1.3, _is_line_aa_enabled())
 
 	var font := ThemeDB.fallback_font
 	if font != null:
@@ -767,7 +787,8 @@ func _draw_team_order_button(
 
 	# Draw mini faceted Pawn icon on the right side of the button
 	var pawn_center := Vector2(btn.size.x - 18.0, cy + 1.0)
-	VectorBoard.draw_faceted_piece_icon(btn, PieceData.Type.PAWN, team, pawn_center, 11.0, is_selected)
+	var atlas_tex: Texture2D = vector_board.get_piece_atlas_texture() if is_instance_valid(vector_board) else null
+	VectorBoard.draw_faceted_piece_icon(btn, PieceData.Type.PAWN, team, pawn_center, 11.0, is_selected, atlas_tex)
 
 
 ## Procedural "Slide-to-Unlock" vector track and faceted Hexagon thumb for ConfirmSlider.
@@ -779,7 +800,7 @@ func _on_confirm_slider_draw() -> void:
 	if s.x < 40.0 or s.y < 16.0:
 		return
 
-	var aa := VectorBoard.line_aa_enabled
+	var aa := _is_line_aa_enabled()
 	var ratio := clampf(sl.value / sl.max_value, 0.0, 1.0)
 	var unlocked := sl.value >= SLIDER_UNLOCK_THRESHOLD
 	var cy := s.y * 0.5
@@ -978,7 +999,7 @@ func _on_cancel_new_game_button_draw() -> void:
 	var c := btn.size * 0.5
 	var alpha := 0.28 if btn.disabled else 0.95
 	var red_col := Color(1.0, 0.30, 0.34, alpha)
-	var aa := VectorBoard.line_aa_enabled
+	var aa := _is_line_aa_enabled()
 
 	var inner_rect := Rect2(Vector2(3, 3), btn.size - Vector2(6, 6))
 	btn.draw_rect(inner_rect, Color(1.0, 0.25, 0.30, 0.04 if btn.disabled else 0.12), true)
@@ -994,7 +1015,7 @@ func _on_confirm_new_game_button_draw() -> void:
 	var btn := confirm_new_game_button
 	var c := btn.size * 0.5
 	var unlocked := not btn.disabled
-	var aa := VectorBoard.line_aa_enabled
+	var aa := _is_line_aa_enabled()
 
 	if unlocked:
 		var inner_rect := Rect2(Vector2(3, 3), btn.size - Vector2(6, 6))

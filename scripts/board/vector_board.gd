@@ -10,11 +10,14 @@ signal selection_changed(piece: PieceData, hovered_move: GameRules.VectorMove)
 
 const SQRT3: float = 1.73205080757
 
-const COLOR_HEX_0 := Color(0.065, 0.082, 0.135, 1.0)     # Darkest hex shade
-const COLOR_HEX_1 := Color(0.105, 0.132, 0.210, 1.0)     # Medium hex shade
-const COLOR_HEX_2 := Color(0.150, 0.188, 0.290, 1.0)     # Lightest hex shade
-const COLOR_GRID_LINE := Color(0.22, 0.31, 0.46, 0.85)
-const COLOR_OUTER_BORDER := Color(0.32, 0.48, 0.72, 0.9)
+const COLOR_HEX_0 := Color(0.050, 0.062, 0.118, 1.0)     # Darkest hex shade (midnight indigo)
+const COLOR_HEX_1 := Color(0.115, 0.172, 0.255, 1.0)     # Medium hex shade (steel slate-blue)
+const COLOR_HEX_2 := Color(0.240, 0.285, 0.395, 1.0)     # Lightest hex shade (cool silver-slate)
+const COLOR_GRID_LINE := Color(0.34, 0.44, 0.60, 0.85)
+const COLOR_PAWN_START := Color(0.70, 0.84, 1.0, 0.42)
+const COLOR_COORD_LABEL := Color(0.80, 0.90, 1.0, 0.62)
+const COLOR_HOVER_FILL := Color(1.0, 1.0, 1.0, 0.08)
+const COLOR_HOVER_BORDER := Color(1.0, 1.0, 1.0, 0.50)
 const COLOR_CYAN := Color(0.0, 0.94, 1.0, 1.0)
 const COLOR_MAGENTA := Color(1.0, 0.16, 0.52, 1.0)
 const COLOR_VECTOR_RAY := Color(0.25, 1.0, 0.65, 0.85)
@@ -27,9 +30,12 @@ const ATLAS_COLS: int = 6
 const ATLAS_ROWS: int = 4
 const ATLAS_RADIUS_RATIO: float = 0.45
 
-static var line_aa_enabled: bool = true
-static var _piece_atlas_texture: Texture2D = null
-
+var line_aa_enabled: bool = true:
+	set(value):
+		if line_aa_enabled != value:
+			line_aa_enabled = value
+			_request_bg_redraw()
+			queue_redraw()
 var rules: GameRules = GameRules.new()
 var selected_piece: PieceData = null
 var legal_moves: Array[GameRules.VectorMove] = []
@@ -40,6 +46,7 @@ var board_flipped: bool = false:
 	set(value):
 		if board_flipped != value:
 			board_flipped = value
+			_clear_hover()
 			_request_bg_redraw()
 			queue_redraw()
 var show_vectors: bool = true
@@ -49,7 +56,12 @@ var show_cell_coords: bool = true:
 			show_cell_coords = value
 			_request_bg_redraw()
 			queue_redraw()
-var input_locked: bool = false
+var input_locked: bool = false:
+	set(value):
+		if input_locked != value:
+			input_locked = value
+			if input_locked:
+				_clear_hover()
 
 var _board_center: Vector2 = Vector2.ZERO
 var _hex_radius: float = 28.0
@@ -64,6 +76,7 @@ var _bg_viewport: SubViewport = null
 var _bg_layer: Control = null
 var _piece_atlas_viewport: SubViewport = null
 var _piece_atlas_layer: Control = null
+var _piece_atlas_texture: Texture2D = null
 
 
 func _init() -> void:
@@ -76,13 +89,34 @@ func _ready() -> void:
 	_setup_bg_layer()
 	_setup_piece_atlas()
 	resized.connect(_on_board_resized)
+	mouse_exited.connect(_on_mouse_exited)
 	_rebuild_board_cache()
 	set_process(true)
 
 
+func _enter_tree() -> void:
+	if is_instance_valid(_bg_viewport):
+		_request_bg_redraw()
+	if is_instance_valid(_piece_atlas_viewport):
+		_piece_atlas_texture = _piece_atlas_viewport.get_texture()
+		if is_instance_valid(_piece_atlas_layer):
+			_piece_atlas_layer.queue_redraw()
+		_piece_atlas_viewport.render_target_update_mode = SubViewport.UPDATE_ONCE
+	queue_redraw()
+
+
 func _exit_tree() -> void:
-	if _piece_atlas_viewport != null and _piece_atlas_texture == _piece_atlas_viewport.get_texture():
+	_piece_atlas_texture = null
+	_clear_hover()
+
+
+func _notification(what: int) -> void:
+	if what == NOTIFICATION_PREDELETE:
 		_piece_atlas_texture = null
+		_piece_atlas_viewport = null
+		_piece_atlas_layer = null
+		_bg_viewport = null
+		_bg_layer = null
 
 
 func _init_cell_metadata() -> void:
@@ -104,7 +138,7 @@ func _init_cell_metadata() -> void:
 
 
 func _setup_bg_layer() -> void:
-	if _bg_viewport != null:
+	if is_instance_valid(_bg_viewport):
 		return
 	_bg_viewport = SubViewport.new()
 	_bg_viewport.name = "BoardBackgroundViewport"
@@ -125,7 +159,7 @@ func _setup_bg_layer() -> void:
 
 
 func _setup_piece_atlas() -> void:
-	if _piece_atlas_viewport != null:
+	if is_instance_valid(_piece_atlas_viewport):
 		return
 	var atlas_size := Vector2i(ATLAS_COLS * ATLAS_CELL_SIZE, ATLAS_ROWS * ATLAS_CELL_SIZE)
 	_piece_atlas_viewport = SubViewport.new()
@@ -143,6 +177,14 @@ func _setup_piece_atlas() -> void:
 	_piece_atlas_viewport.add_child(_piece_atlas_layer)
 	add_child(_piece_atlas_viewport)
 	_piece_atlas_texture = _piece_atlas_viewport.get_texture()
+
+
+func get_piece_atlas_texture() -> Texture2D:
+	if not is_instance_valid(_piece_atlas_viewport) or not _piece_atlas_viewport.is_inside_tree():
+		return null
+	if not is_instance_valid(_piece_atlas_texture):
+		_piece_atlas_texture = _piece_atlas_viewport.get_texture()
+	return _piece_atlas_texture
 
 
 func _on_piece_atlas_draw() -> void:
@@ -191,7 +233,7 @@ func _on_board_resized() -> void:
 
 
 func _request_bg_redraw() -> void:
-	if _bg_viewport != null and _bg_layer != null:
+	if is_instance_valid(_bg_viewport) and is_instance_valid(_bg_layer):
 		var vp_w := maxi(int(size.x), 1)
 		var vp_h := maxi(int(size.y), 1)
 		var target_size := Vector2i(vp_w, vp_h)
@@ -204,8 +246,6 @@ func _request_bg_redraw() -> void:
 
 func set_line_antialiasing(enabled: bool) -> void:
 	line_aa_enabled = enabled
-	_request_bg_redraw()
-	queue_redraw()
 
 
 func _rebuild_board_cache() -> void:
@@ -271,6 +311,7 @@ func start_new_game() -> void:
 	rules.reset_game()
 	selected_piece = null
 	legal_moves = []
+	hovered_cell = GameRules.INVALID_HEX
 	hovered_move = null
 	pending_promotion_move = null
 	input_locked = false
@@ -285,6 +326,7 @@ func undo_move() -> bool:
 	if rules.undo_last_move():
 		selected_piece = null
 		legal_moves = []
+		hovered_cell = GameRules.INVALID_HEX
 		hovered_move = null
 		_rebuild_board_cache()
 		selection_changed.emit(null, null)
@@ -319,18 +361,47 @@ func complete_promotion(chosen_type: PieceData.Type) -> void:
 	_commit_move(mv)
 
 
+func _on_mouse_exited() -> void:
+	_clear_hover()
+
+
+func _clear_hover() -> void:
+	if hovered_cell == GameRules.INVALID_HEX and hovered_move == null:
+		return
+	hovered_cell = GameRules.INVALID_HEX
+	_update_hovered_move()
+	queue_redraw()
+
+
 func _gui_input(event: InputEvent) -> void:
+	if event is InputEventScreenTouch and not event.pressed and event.device != InputEvent.DEVICE_ID_EMULATION:
+		_clear_hover()
+		return
+	if event is InputEventScreenDrag and event.device != InputEvent.DEVICE_ID_EMULATION:
+		_clear_hover()
+		return
+	if event is InputEventMouseButton and not event.pressed and event.device == InputEvent.DEVICE_ID_EMULATION:
+		_clear_hover()
+		return
+	if event is InputEventMouseMotion and event.device == InputEvent.DEVICE_ID_EMULATION:
+		_clear_hover()
+		return
+
 	if pending_promotion_move != null or input_locked:
 		return
 
 	if event is InputEventMouseMotion:
-		var cell := _screen_to_axial(event.position)
+		var raw_cell := _screen_to_axial(event.position)
+		var cell := raw_cell if GameRules.is_inside_board(raw_cell) else GameRules.INVALID_HEX
 		if cell != hovered_cell:
 			hovered_cell = cell
 			_update_hovered_move()
 			queue_redraw()
 
 	elif event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT:
+		if event.device == InputEvent.DEVICE_ID_EMULATION:
+			hovered_cell = GameRules.INVALID_HEX
+			hovered_move = null
 		var cell := _screen_to_axial(event.position)
 		_handle_cell_interaction(cell)
 
@@ -358,8 +429,7 @@ func _handle_cell_interaction(cell: Vector2i) -> void:
 			legal_moves = cached.duplicate()
 		else:
 			legal_moves = rules.get_legal_moves_for_piece(selected_piece)
-		_update_hovered_move()
-		selection_changed.emit(selected_piece, hovered_move)
+		_update_hovered_move(true)
 		queue_redraw()
 	else:
 		_clear_selection()
@@ -392,14 +462,16 @@ func _clear_selection() -> void:
 	queue_redraw()
 
 
-func _update_hovered_move() -> void:
+func _update_hovered_move(force_emit: bool = false) -> void:
+	var prev_hovered := hovered_move
 	hovered_move = null
 	if selected_piece != null and GameRules.is_inside_board(hovered_cell):
 		for mv in legal_moves:
 			if mv.to == hovered_cell:
 				hovered_move = mv
 				break
-	selection_changed.emit(selected_piece, hovered_move)
+	if force_emit or hovered_move != prev_hovered:
+		selection_changed.emit(selected_piece, hovered_move)
 
 
 func _on_bg_layer_draw() -> void:
@@ -428,7 +500,7 @@ func _draw_board_background_on(canvas: CanvasItem) -> void:
 		if is_pawn_start:
 			var inner_hex := _make_hex_polygon(center, _hex_radius * 0.20)
 			inner_hex.append(inner_hex[0])
-			canvas.draw_polyline(inner_hex, Color(0.35, 0.5, 0.7, 0.20), 1.0, line_aa_enabled)
+			canvas.draw_polyline(inner_hex, COLOR_PAWN_START, 1.0, line_aa_enabled)
 
 	# 2. Draw coordinate labels
 	if show_cell_coords:
@@ -439,7 +511,7 @@ func _draw() -> void:
 	_compute_board_metrics()
 
 	# 1 & 2. Render cached static board SubViewport texture as 1 quad (or fallback if headless)
-	if _bg_viewport != null and size.x > 1.0 and size.y > 1.0:
+	if is_instance_valid(_bg_viewport) and _bg_viewport.is_inside_tree() and size.x > 1.0 and size.y > 1.0:
 		var target_vp_size := Vector2i(int(size.x), int(size.y))
 		if _bg_viewport.size != target_vp_size:
 			_request_bg_redraw()
@@ -454,7 +526,7 @@ func _draw() -> void:
 		_draw_hex_highlight(from_c, Color(COLOR_LAST_MOVE, 0.16), Color(COLOR_LAST_MOVE, 0.55), 1.8)
 		_draw_hex_highlight(to_c, Color(COLOR_LAST_MOVE, 0.24), Color(COLOR_LAST_MOVE, 0.75), 2.2)
 		if show_vectors:
-			_draw_vector_arrow(from_c, to_c, COLOR_LAST_MOVE, 2.0, false)
+			_draw_vector_arrow(from_c, to_c, COLOR_LAST_MOVE, 2.0)
 
 	# 4. Team-wide vector overlay (when Vectors: ON)
 	if show_vectors:
@@ -468,7 +540,7 @@ func _draw() -> void:
 				var origin := _axial_to_screen(p.visual_pos)
 				for mv in p_moves:
 					var dest := _axial_to_screen(Vector2(mv.to))
-					_draw_vector_arrow(origin, dest, ray_col, 1.4, false)
+					_draw_vector_arrow(origin, dest, ray_col, 1.4)
 
 	# 5. Selected piece & legal move targets/vectors
 	if selected_piece != null:
@@ -490,12 +562,13 @@ func _draw() -> void:
 				draw_circle(dest, _hex_radius * (0.24 if is_hovered else 0.16), Color(col, alpha))
 
 			if show_vectors:
-				_draw_vector_arrow(origin, dest, Color(col, alpha), width, is_hovered)
+				var arrow_label := format_vector_delta_label(mv.delta) if is_hovered else ""
+				_draw_vector_arrow(origin, dest, Color(col, alpha), width, arrow_label)
 
 	# 6. Hover cursor hex outline
 	if GameRules.is_inside_board(hovered_cell):
 		var h_center := _axial_to_screen(Vector2(hovered_cell))
-		_draw_hex_highlight(h_center, Color(1, 1, 1, 0.04), Color(1, 1, 1, 0.35), 1.6)
+		_draw_hex_highlight(h_center, COLOR_HOVER_FILL, COLOR_HOVER_BORDER, 1.6)
 
 	# 7. Highlight King in check & caution orange check vectors
 	for king_piece in _cached_check_kings:
@@ -514,7 +587,7 @@ func _draw() -> void:
 			var king_piece: PieceData = cv["king"]
 			var from_c := _axial_to_screen(attacker.visual_pos)
 			var to_c := _axial_to_screen(king_piece.visual_pos)
-			_draw_vector_arrow(from_c, to_c, COLOR_CHECK_VECTOR, 2.4, false, 0.86)
+			_draw_vector_arrow(from_c, to_c, COLOR_CHECK_VECTOR, 2.4, "", 0.86)
 
 	# 8. Draw all pieces using batched shared atlas quads
 	for p in rules.pieces:
@@ -542,7 +615,26 @@ func _draw_polygon_piece(piece: PieceData) -> void:
 	if is_selected:
 		radius *= (1.0 + 0.07 * sin(_pulse_time * 6.0))
 
-	draw_faceted_piece_icon(self, piece.type, piece.team, center, radius, is_selected)
+	draw_faceted_piece_icon(
+		self,
+		piece.type,
+		piece.team,
+		center,
+		radius,
+		is_selected,
+		get_piece_atlas_texture()
+	)
+
+
+static func _is_valid_atlas_texture(atlas_texture: Texture2D) -> bool:
+	if atlas_texture == null or not is_instance_valid(atlas_texture):
+		return false
+	if not atlas_texture.get_rid().is_valid():
+		return false
+	return (
+		atlas_texture.get_width() >= ATLAS_COLS * ATLAS_CELL_SIZE
+		and atlas_texture.get_height() >= ATLAS_ROWS * ATLAS_CELL_SIZE
+	)
 
 
 static func draw_faceted_piece_icon(
@@ -551,16 +643,17 @@ static func draw_faceted_piece_icon(
 	p_team: PieceData.Team,
 	center: Vector2,
 	radius: float,
-	is_selected: bool = false
+	is_selected: bool = false,
+	atlas_texture: Texture2D = null
 ) -> void:
-	if _piece_atlas_texture != null:
+	if _is_valid_atlas_texture(atlas_texture):
 		var src_rect := get_piece_atlas_region(p_type, p_team, is_selected)
 		var dst_extent := radius / ATLAS_RADIUS_RATIO
 		var dst_rect := Rect2(
 			center - Vector2(dst_extent * 0.5, dst_extent * 0.5),
 			Vector2(dst_extent, dst_extent)
 		)
-		canvas.draw_texture_rect_region(_piece_atlas_texture, dst_rect, src_rect)
+		canvas.draw_texture_rect_region(atlas_texture, dst_rect, src_rect)
 		return
 
 	var mesh := PieceData.get_piece_array_mesh(p_type, p_team, is_selected)
@@ -568,12 +661,28 @@ static func draw_faceted_piece_icon(
 	canvas.draw_mesh(mesh, null, xform)
 
 
+static func format_vector_delta_label(delta: Vector2i) -> String:
+	return "d(%+d,%+d)" % [delta.x, delta.y]
+
+
+static func compute_centered_label_pos(
+	anchor: Vector2,
+	font: Font,
+	label_text: String,
+	font_size: int
+) -> Vector2:
+	var str_w := font.get_string_size(label_text, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size).x
+	var ascent := font.get_ascent(font_size)
+	var descent := font.get_descent(font_size)
+	return Vector2(anchor.x - str_w * 0.5, anchor.y + (ascent - descent) * 0.5)
+
+
 func _draw_vector_arrow(
 	from_pt: Vector2,
 	to_pt: Vector2,
 	color: Color,
 	width: float,
-	draw_label: bool,
+	label_text: String = "",
 	end_inset_ratio: float = 0.25
 ) -> void:
 	var diff := to_pt - from_pt
@@ -599,11 +708,13 @@ func _draw_vector_arrow(
 	])
 	draw_colored_polygon(arrow_head, color)
 
-	if draw_label and ThemeDB.fallback_font != null:
-		var mid := (start_pt + tip_pt) * 0.5 + normal * 12.0
-		var axial_delta := _screen_to_axial(to_pt) - _screen_to_axial(from_pt)
-		var label := "d(%+d,%+d)" % [axial_delta.x, axial_delta.y]
-		draw_string(ThemeDB.fallback_font, mid, label, HORIZONTAL_ALIGNMENT_CENTER, -1, 11, color.lightened(0.35))
+	if not label_text.is_empty() and ThemeDB.fallback_font != null:
+		var font := ThemeDB.fallback_font
+		var font_size := 11
+		var mid := (start_pt + tip_pt) * 0.5 + normal * 14.0
+		var label_pos := compute_centered_label_pos(mid, font, label_text, font_size)
+		draw_string_outline(font, label_pos, label_text, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size, 3, Color(0.03, 0.04, 0.08, 0.90))
+		draw_string(font, label_pos, label_text, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size, color.lightened(0.35))
 
 
 func _draw_hex_coordinates_on(canvas: CanvasItem) -> void:
@@ -612,14 +723,13 @@ func _draw_hex_coordinates_on(canvas: CanvasItem) -> void:
 		return
 
 	var font_size := clampi(int(_hex_radius * 0.34), 8, 11)
-	var label_col := Color(0.62, 0.75, 0.92, 0.42)
 
 	for meta in _cell_meta:
 		var cell: Vector2i = meta["cell"]
 		var alg: String = meta["algebraic"]
 		var center := _axial_to_screen(Vector2(cell))
 		var pos := center + Vector2(-_hex_radius * 0.46, -_hex_radius * 0.42)
-		canvas.draw_string(font, pos, alg, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size, label_col)
+		canvas.draw_string(font, pos, alg, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size, COLOR_COORD_LABEL)
 
 
 func _spawn_polygon_burst(cell: Vector2i, color: Color) -> void:
