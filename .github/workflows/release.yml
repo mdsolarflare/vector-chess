@@ -9,7 +9,7 @@ on:
         type: string
         default: "0.1.0"
       steam_branch:
-        description: "Steam branch to set live (e.g. beta, default, or empty for none)"
+        description: "Non-default Steam branch to set live via SteamCMD (e.g. beta, or leave empty for none; 'default' must be promoted in Steamworks UI)"
         required: false
         type: string
         default: "beta"
@@ -32,8 +32,6 @@ defaults:
     shell: bash
 
 env:
-  GODOT_VERSION: "4.7.2"
-  RELEASE_TYPE: "stable"
   EXPORT_NAME: "VectorChess"
 
 jobs:
@@ -46,7 +44,6 @@ jobs:
     outputs:
       version: ${{ steps.meta.outputs.version }}
       short_version: ${{ steps.meta.outputs.short_version }}
-      build_version: ${{ steps.meta.outputs.build_version }}
       tag_name: ${{ steps.meta.outputs.tag_name }}
       steam_branch: ${{ steps.meta.outputs.steam_branch }}
     steps:
@@ -56,10 +53,17 @@ jobs:
           RAW_VERSION: ${{ inputs.release_version }}
           SET_LIVE: ${{ inputs.steam_branch }}
           RUN_NUMBER: ${{ github.run_number }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
         run: |
           VER="${RAW_VERSION#v}"
-          if [[ ! "${VER}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
-            echo "::error::Invalid release_version '${RAW_VERSION}'. Expected semantic version matching ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$."
+          if [[ ! "${VER}" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]]; then
+            echo "::error::Invalid release_version '${RAW_VERSION}'. Expected strict semver (e.g. 0.2.0 or 0.2.0-rc.1, without leading zeros)."
+            exit 1
+          fi
+          TRIMMED_LIVE="${SET_LIVE#"${SET_LIVE%%[![:space:]]*}"}"
+          TRIMMED_LIVE="${TRIMMED_LIVE%"${TRIMMED_LIVE##*[![:space:]]}"}"
+          if [[ "${TRIMMED_LIVE,,}" == "default" ]]; then
+            echo "::error::SteamPipe/SteamCMD forbids setting the 'default' branch live via SetLive. Leave steam_branch empty (or upload to 'beta') and promote to 'default' in the Steamworks Partner web portal."
             exit 1
           fi
           if [[ ! "${SET_LIVE}" =~ ^[0-9A-Za-z._/-]*$ ]]; then
@@ -70,11 +74,26 @@ jobs:
             echo "::error::Invalid GitHub run_number '${RUN_NUMBER}'."
             exit 1
           fi
+          if [[ ! "${RUN_ATTEMPT}" =~ ^[1-9][0-9]*$ ]] || (( RUN_ATTEMPT < 1 || RUN_ATTEMPT > 99 )); then
+            echo "::error::Invalid GitHub run_attempt '${RUN_ATTEMPT}' (must be 1..99)."
+            exit 1
+          fi
           SHORT_VER="${VER%%-*}"
+          IFS='.' read -r VER_MAJOR VER_MINOR VER_PATCH <<< "${SHORT_VER}"
+          for PART in "${VER_MAJOR}" "${VER_MINOR}" "${VER_PATCH}"; do
+            if (( 10#${PART} > 65535 )); then
+              echo "::error::Version component '${PART}' in '${SHORT_VER}' exceeds Windows PE 16-bit limit (65535)."
+              exit 1
+            fi
+          done
+          BUILD_VERSION=$(( RUN_NUMBER * 100 + RUN_ATTEMPT ))
+          if (( BUILD_VERSION > 2100000000 )); then
+            echo "::error::Computed build_version '${BUILD_VERSION}' exceeds Google Play maximum versionCode (2100000000)."
+            exit 1
+          fi
           {
             echo "version=${VER}"
             echo "short_version=${SHORT_VER}"
-            echo "build_version=${RUN_NUMBER}"
             echo "tag_name=v${VER}"
             echo "steam_branch=${SET_LIVE}"
           } >> "$GITHUB_OUTPUT"
@@ -82,22 +101,8 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Install Godot Binary
-        env:
-          BASE_URL: "https://github.com/godotengine/godot/releases/download/${{ env.GODOT_VERSION }}-${{ env.RELEASE_TYPE }}"
-          ZIP_NAME: "Godot_v${{ env.GODOT_VERSION }}-${{ env.RELEASE_TYPE }}_linux.x86_64.zip"
-        run: |
-          GODOT_DIR="$HOME/.cache/godot/${GODOT_VERSION}-${RELEASE_TYPE}"
-          if [ ! -x "${GODOT_DIR}/godot" ]; then
-            mkdir -p "${GODOT_DIR}"
-            curl -fsSL --retry 3 --retry-delay 2 "${BASE_URL}/${ZIP_NAME}" -o "$RUNNER_TEMP/${ZIP_NAME}"
-            unzip -q -o "$RUNNER_TEMP/${ZIP_NAME}" -d "${GODOT_DIR}"
-            mv -f "${GODOT_DIR}/Godot_v${GODOT_VERSION}-${RELEASE_TYPE}_linux.x86_64" "${GODOT_DIR}/godot"
-            chmod +x "${GODOT_DIR}/godot"
-            rm -f "$RUNNER_TEMP/${ZIP_NAME}"
-          fi
-          echo "${GODOT_DIR}" >> "$GITHUB_PATH"
-          "${GODOT_DIR}/godot" --version
+      - name: Setup Official Godot Binary
+        uses: ./.github/actions/setup-godot
 
       - name: Import & Run Tests
         run: |
@@ -116,14 +121,29 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Stamp Release Version
+        id: stamp
         env:
           VERSION: ${{ needs.test.outputs.version }}
-          BUILD_VERSION: ${{ needs.test.outputs.build_version }}
+          SHORT_VERSION: ${{ needs.test.outputs.short_version }}
+          RUN_NUMBER: ${{ github.run_number }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
         run: |
-          python3 - "${VERSION}" "${BUILD_VERSION}" <<'PY'
+          if [[ ! "${RUN_NUMBER}" =~ ^[1-9][0-9]*$ ]] || [[ ! "${RUN_ATTEMPT}" =~ ^[1-9][0-9]*$ ]] || (( RUN_ATTEMPT < 1 || RUN_ATTEMPT > 99 )); then
+            echo "::error::Invalid GitHub run_number/run_attempt ('${RUN_NUMBER}' / '${RUN_ATTEMPT}')."
+            exit 1
+          fi
+          BUILD_VERSION=$(( RUN_NUMBER * 100 + RUN_ATTEMPT ))
+          if (( BUILD_VERSION > 2100000000 )); then
+            echo "::error::Computed build_version '${BUILD_VERSION}' exceeds Google Play maximum versionCode (2100000000)."
+            exit 1
+          fi
+          WIN_BUILD=$(( (BUILD_VERSION - 1) % 65535 + 1 ))
+          WIN_VERSION="${SHORT_VERSION}.${WIN_BUILD}"
+
+          python3 - "${VERSION}" "${BUILD_VERSION}" "${WIN_VERSION}" <<'PY'
           import pathlib, re, sys
 
-          ver, build_ver = sys.argv[1:3]
+          ver, build_ver, win_ver = sys.argv[1:4]
           proj_path = pathlib.Path("project.godot")
           proj_text = proj_path.read_text(encoding="utf-8")
           proj_text, n_proj = re.subn(
@@ -132,8 +152,8 @@ jobs:
               proj_text,
               flags=re.MULTILINE,
           )
-          if n_proj == 0:
-              raise SystemExit("Failed to find config/version in project.godot")
+          if n_proj != 1:
+              raise SystemExit(f"Expected 1 config/version in project.godot, updated {n_proj}")
           proj_path.write_text(proj_text, encoding="utf-8")
 
           presets_path = pathlib.Path("export_presets.cfg")
@@ -150,10 +170,32 @@ jobs:
               presets_text,
               flags=re.MULTILINE,
           )
-          if n_code < 2 or n_name < 2:
-              raise SystemExit("Failed to update Android version/code and version/name in export_presets.cfg")
+          presets_text, n_win_file = re.subn(
+              r'^(application/file_version)=".*"$',
+              lambda m: f'{m.group(1)}="{win_ver}"',
+              presets_text,
+              flags=re.MULTILINE,
+          )
+          presets_text, n_win_prod = re.subn(
+              r'^(application/product_version)=".*"$',
+              lambda m: f'{m.group(1)}="{win_ver}"',
+              presets_text,
+              flags=re.MULTILINE,
+          )
+          if n_code != 2 or n_name != 2:
+              raise SystemExit(
+                  f"Expected 2 Android version/code and version/name entries in export_presets.cfg (got {n_code}, {n_name})"
+              )
+          if n_win_file != 1 or n_win_prod != 1:
+              raise SystemExit(
+                  f"Expected 1 Windows file_version and product_version entry in export_presets.cfg (got {n_win_file}, {n_win_prod})"
+              )
           presets_path.write_text(presets_text, encoding="utf-8")
           PY
+          {
+            echo "build_version=${BUILD_VERSION}"
+            echo "win_version=${WIN_VERSION}"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Setup Java 17 (Required for Godot 4.7 Android Gradle Builds)
         uses: actions/setup-java@v4
@@ -161,37 +203,11 @@ jobs:
           distribution: "temurin"
           java-version: "17"
 
-      - name: Install Godot Binary
-        env:
-          BASE_URL: "https://github.com/godotengine/godot/releases/download/${{ env.GODOT_VERSION }}-${{ env.RELEASE_TYPE }}"
-          ZIP_NAME: "Godot_v${{ env.GODOT_VERSION }}-${{ env.RELEASE_TYPE }}_linux.x86_64.zip"
-        run: |
-          GODOT_DIR="$HOME/.cache/godot/${GODOT_VERSION}-${RELEASE_TYPE}"
-          if [ ! -x "${GODOT_DIR}/godot" ]; then
-            mkdir -p "${GODOT_DIR}"
-            curl -fsSL --retry 3 --retry-delay 2 "${BASE_URL}/${ZIP_NAME}" -o "$RUNNER_TEMP/${ZIP_NAME}"
-            unzip -q -o "$RUNNER_TEMP/${ZIP_NAME}" -d "${GODOT_DIR}"
-            mv -f "${GODOT_DIR}/Godot_v${GODOT_VERSION}-${RELEASE_TYPE}_linux.x86_64" "${GODOT_DIR}/godot"
-            chmod +x "${GODOT_DIR}/godot"
-            rm -f "$RUNNER_TEMP/${ZIP_NAME}"
-          fi
-          echo "${GODOT_DIR}" >> "$GITHUB_PATH"
-          "${GODOT_DIR}/godot" --version
-
-      - name: Install Export Templates
-        env:
-          BASE_URL: "https://github.com/godotengine/godot/releases/download/${{ env.GODOT_VERSION }}-${{ env.RELEASE_TYPE }}"
-          TPZ_NAME: "Godot_v${{ env.GODOT_VERSION }}-${{ env.RELEASE_TYPE }}_export_templates.tpz"
-        run: |
-          TEMPLATE_DIR="$HOME/.local/share/godot/export_templates/${GODOT_VERSION}.${RELEASE_TYPE}"
-          if [ ! -f "${TEMPLATE_DIR}/android_source.zip" ] || [ ! -f "${TEMPLATE_DIR}/linux_release.x86_64" ] || [ ! -f "${TEMPLATE_DIR}/windows_release_x86_64.exe" ]; then
-            mkdir -p "${TEMPLATE_DIR}"
-            rm -rf "$RUNNER_TEMP/godot_templates"
-            curl -fsSL --retry 3 --retry-delay 2 "${BASE_URL}/${TPZ_NAME}" -o "$RUNNER_TEMP/${TPZ_NAME}"
-            unzip -q -o "$RUNNER_TEMP/${TPZ_NAME}" -d "$RUNNER_TEMP/godot_templates"
-            mv -f "$RUNNER_TEMP/godot_templates/templates"/* "${TEMPLATE_DIR}/"
-            rm -rf "$RUNNER_TEMP/${TPZ_NAME}" "$RUNNER_TEMP/godot_templates"
-          fi
+      - name: Setup Official Godot Binary & Export Templates
+        id: setup-godot
+        uses: ./.github/actions/setup-godot
+        with:
+          templates: desktop-android
 
       - name: Import Project Headlessly
         run: |
@@ -200,9 +216,30 @@ jobs:
       - name: Export Windows & Linux Depots
         env:
           VERSION: ${{ needs.test.outputs.version }}
+          WIN_VERSION: ${{ steps.stamp.outputs.win_version }}
+          TEMPLATES_DIR: ${{ steps.setup-godot.outputs.templates-dir }}
         run: |
+          set -o pipefail
           mkdir -p build/windows build/linux dist
-          godot --headless --export-release "Windows Desktop" "build/windows/${EXPORT_NAME}.exe"
+          WIN_EXPORT_LOG="$RUNNER_TEMP/windows-export.log"
+          godot --headless --export-release "Windows Desktop" "build/windows/${EXPORT_NAME}.exe" 2>&1 | tee "${WIN_EXPORT_LOG}"
+          if grep -Eiq "Resources Modification|Invalid icon|Invalid file version|Invalid product version|template_modifier|Could not load icon|Cannot load icon|rcedit" "${WIN_EXPORT_LOG}"; then
+            echo "::error::Windows export reported PE resource or icon modification warnings."
+            exit 1
+          fi
+          rm -f "${WIN_EXPORT_LOG}"
+
+          python3 .github/scripts/verify_windows_pe.py \
+            --template "${TEMPLATES_DIR}/windows_release_x86_64.exe" \
+            --expect "ProductName=Vector Chess" \
+            --expect "FileDescription=Vector Chess - Polygon Pandemonium" \
+            --expect "CompanyName=Vector Chess" \
+            --expect "FileVersion=${WIN_VERSION}" \
+            --expect "ProductVersion=${WIN_VERSION}" \
+            --forbid-substring "ProductName=Godot" \
+            --forbid-substring "FileDescription=Godot" \
+            "build/windows/${EXPORT_NAME}.exe"
+
           godot --headless --export-release "Linux" "build/linux/${EXPORT_NAME}.x86_64"
           chmod +x "build/linux/${EXPORT_NAME}.x86_64"
           test -f "build/windows/${EXPORT_NAME}.exe"
@@ -218,15 +255,18 @@ jobs:
       - name: Configure Android SDK, Gradle Template & Keystore
         id: android-config
         env:
+          TEMPLATES_DIR: ${{ steps.setup-godot.outputs.templates-dir }}
+          GODOT_VERSION: ${{ steps.setup-godot.outputs.version }}
+          RELEASE_TYPE: ${{ steps.setup-godot.outputs.release-type }}
+          GODOT_MINOR: ${{ steps.setup-godot.outputs.minor-version }}
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
           ANDROID_KEYSTORE_USER: ${{ secrets.ANDROID_KEYSTORE_USER }}
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           GOOGLE_PLAY_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}
         run: |
           # Populate Godot Android Gradle template from export templates
-          TEMPLATE_DIR="$HOME/.local/share/godot/export_templates/${GODOT_VERSION}.${RELEASE_TYPE}"
           mkdir -p android/build
-          unzip -q -o "${TEMPLATE_DIR}/android_source.zip" -d android/build/
+          unzip -q -o "${TEMPLATES_DIR}/android_source.zip" -d android/build/
           touch android/build/.gdignore
           chmod +x android/build/gradlew
           printf "%s.%s" "${GODOT_VERSION}" "${RELEASE_TYPE}" > android/.build_version
@@ -243,7 +283,6 @@ jobs:
               -dname "CN=Android Debug,O=Android,C=US"
           )
 
-          GODOT_MINOR=$(echo "${GODOT_VERSION}" | cut -d. -f1,2)
           mkdir -p ~/.config/godot
           cat <<EOF > ~/.config/godot/editor_settings-${GODOT_MINOR}.tres
           [gd_resource type="EditorSettings" format=3]
@@ -445,11 +484,23 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Stamp Release Version
+        id: stamp
         env:
           VERSION: ${{ needs.test.outputs.version }}
           SHORT_VERSION: ${{ needs.test.outputs.short_version }}
-          BUILD_VERSION: ${{ needs.test.outputs.build_version }}
+          RUN_NUMBER: ${{ github.run_number }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
         run: |
+          if [[ ! "${RUN_NUMBER}" =~ ^[1-9][0-9]*$ ]] || [[ ! "${RUN_ATTEMPT}" =~ ^[1-9][0-9]*$ ]] || (( RUN_ATTEMPT < 1 || RUN_ATTEMPT > 99 )); then
+            echo "::error::Invalid GitHub run_number/run_attempt ('${RUN_NUMBER}' / '${RUN_ATTEMPT}')."
+            exit 1
+          fi
+          BUILD_VERSION=$(( RUN_NUMBER * 100 + RUN_ATTEMPT ))
+          if (( BUILD_VERSION > 2100000000 )); then
+            echo "::error::Computed build_version '${BUILD_VERSION}' exceeds supported build number limit (2100000000)."
+            exit 1
+          fi
+
           python3 - "${VERSION}" "${SHORT_VERSION}" "${BUILD_VERSION}" <<'PY'
           import pathlib, re, sys
 
@@ -463,8 +514,8 @@ jobs:
               proj_text,
               flags=re.MULTILINE,
           )
-          if n_proj == 0:
-              raise SystemExit("Failed to find config/version in project.godot")
+          if n_proj != 1:
+              raise SystemExit(f"Expected 1 config/version in project.godot, updated {n_proj}")
           proj_path.write_text(proj_text, encoding="utf-8")
 
           presets_path = pathlib.Path("export_presets.cfg")
@@ -481,48 +532,29 @@ jobs:
               presets_text,
               flags=re.MULTILINE,
           )
-          if n_short < 2 or n_ver < 2:
-              raise SystemExit("Failed to update macOS and iOS version fields in export_presets.cfg")
+          if n_short != 2 or n_ver != 2:
+              raise SystemExit(
+                  f"Expected 2 macOS/iOS short_version and version entries in export_presets.cfg (got {n_short}, {n_ver})"
+              )
           presets_path.write_text(presets_text, encoding="utf-8")
           PY
+          echo "build_version=${BUILD_VERSION}" >> "$GITHUB_OUTPUT"
 
-      - name: Install Godot macOS Binary
-        env:
-          BASE_URL: "https://github.com/godotengine/godot/releases/download/${{ env.GODOT_VERSION }}-${{ env.RELEASE_TYPE }}"
-          ZIP_NAME: "Godot_v${{ env.GODOT_VERSION }}-${{ env.RELEASE_TYPE }}_macos.universal.zip"
-        run: |
-          GODOT_DIR="$HOME/.cache/godot-macos/${GODOT_VERSION}-${RELEASE_TYPE}"
-          if [ ! -x "${GODOT_DIR}/Godot.app/Contents/MacOS/Godot" ]; then
-            mkdir -p "${GODOT_DIR}"
-            rm -rf "${GODOT_DIR}/Godot.app"
-            curl -fsSL --retry 3 --retry-delay 2 "${BASE_URL}/${ZIP_NAME}" -o "$RUNNER_TEMP/${ZIP_NAME}"
-            unzip -q -o "$RUNNER_TEMP/${ZIP_NAME}" -d "${GODOT_DIR}"
-            rm -f "$RUNNER_TEMP/${ZIP_NAME}"
-          fi
-          "${GODOT_DIR}/Godot.app/Contents/MacOS/Godot" --version
-
-      - name: Install Export Templates (macOS)
-        env:
-          BASE_URL: "https://github.com/godotengine/godot/releases/download/${{ env.GODOT_VERSION }}-${{ env.RELEASE_TYPE }}"
-          TPZ_NAME: "Godot_v${{ env.GODOT_VERSION }}-${{ env.RELEASE_TYPE }}_export_templates.tpz"
-        run: |
-          TEMPLATE_DIR="$HOME/Library/Application Support/Godot/export_templates/${GODOT_VERSION}.${RELEASE_TYPE}"
-          if [ ! -f "${TEMPLATE_DIR}/macos.zip" ] || [ ! -f "${TEMPLATE_DIR}/ios.zip" ]; then
-            mkdir -p "${TEMPLATE_DIR}"
-            rm -rf "$RUNNER_TEMP/godot_templates"
-            curl -fsSL --retry 3 --retry-delay 2 "${BASE_URL}/${TPZ_NAME}" -o "$RUNNER_TEMP/${TPZ_NAME}"
-            unzip -q -o "$RUNNER_TEMP/${TPZ_NAME}" -d "$RUNNER_TEMP/godot_templates"
-            mv -f "$RUNNER_TEMP/godot_templates/templates"/* "${TEMPLATE_DIR}/"
-            rm -rf "$RUNNER_TEMP/${TPZ_NAME}" "$RUNNER_TEMP/godot_templates"
-          fi
+      - name: Setup Official Godot macOS Binary & Export Templates
+        id: setup-godot
+        uses: ./.github/actions/setup-godot
+        with:
+          templates: apple
 
       - name: Import Project Headlessly
+        env:
+          GODOT_BIN: ${{ steps.setup-godot.outputs.godot-bin }}
         run: |
-          GODOT_BIN="$HOME/.cache/godot-macos/${GODOT_VERSION}-${RELEASE_TYPE}/Godot.app/Contents/MacOS/Godot"
           "${GODOT_BIN}" --headless --import
 
       - name: Export, Sign & Notarize macOS Universal App (Steam)
         env:
+          GODOT_BIN: ${{ steps.setup-godot.outputs.godot-bin }}
           VERSION: ${{ needs.test.outputs.version }}
           APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_MACOS_CERTIFICATE_BASE64 || secrets.APPLE_CERTIFICATE_BASE64 }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_MACOS_CERTIFICATE_PASSWORD || secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -531,7 +563,6 @@ jobs:
           APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
           APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
         run: |
-          GODOT_BIN="$HOME/.cache/godot-macos/${GODOT_VERSION}-${RELEASE_TYPE}/Godot.app/Contents/MacOS/Godot"
           mkdir -p build/macos dist
           "${GODOT_BIN}" --headless --export-release "macOS" "build/macos/${EXPORT_NAME}.app"
           test -d "build/macos/${EXPORT_NAME}.app"
@@ -604,9 +635,10 @@ jobs:
 
       - name: Export iOS (.ipa or Xcode Project)
         env:
+          GODOT_BIN: ${{ steps.setup-godot.outputs.godot-bin }}
           VERSION: ${{ needs.test.outputs.version }}
           SHORT_VERSION: ${{ needs.test.outputs.short_version }}
-          BUILD_VERSION: ${{ needs.test.outputs.build_version }}
+          BUILD_VERSION: ${{ steps.stamp.outputs.build_version }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           APPLE_APP_ID: ${{ secrets.APPLE_APP_ID || vars.APPLE_APP_ID }}
           APPLE_IOS_CERT_BASE64: ${{ secrets.APPLE_IOS_CERTIFICATE_BASE64 || secrets.APPLE_CERTIFICATE_BASE64 }}
@@ -617,7 +649,6 @@ jobs:
           APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
           UPLOAD_TO_STORES: ${{ inputs.upload_to_stores == true }}
         run: |
-          GODOT_BIN="$HOME/.cache/godot-macos/${GODOT_VERSION}-${RELEASE_TYPE}/Godot.app/Contents/MacOS/Godot"
           mkdir -p build/ios dist
 
           if [ -n "${APPLE_TEAM_ID}" ] && [ -n "${APPLE_IOS_CERT_BASE64}" ] && [ -n "${APPLE_PROVISION_BASE64}" ]; then
@@ -872,13 +903,13 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: steam-linux
-          path: /tmp/steam-linux
+          path: ${{ runner.temp }}/steam-linux
 
       - name: Download macOS Depot
         uses: actions/download-artifact@v4
         with:
           name: steam-macos
-          path: /tmp/steam-macos
+          path: ${{ runner.temp }}/steam-macos
 
       - name: Unpack Depots & Populate SteamPipe VDFs
         env:
@@ -890,9 +921,16 @@ jobs:
           VERSION: ${{ needs.test.outputs.version }}
           COMMIT_SHA: ${{ github.sha }}
         run: |
+          TRIMMED_LIVE="${SET_LIVE#"${SET_LIVE%%[![:space:]]*}"}"
+          TRIMMED_LIVE="${TRIMMED_LIVE%"${TRIMMED_LIVE##*[![:space:]]}"}"
+          if [[ "${TRIMMED_LIVE,,}" == "default" ]]; then
+            echo "::error::SteamPipe/SteamCMD forbids setting the 'default' branch live via SetLive. Promote builds to 'default' manually in the Steamworks Partner web portal."
+            exit 1
+          fi
+
           mkdir -p build steam/output
-          tar -xf /tmp/steam-linux/steam-linux.tar -C build
-          tar -xf /tmp/steam-macos/steam-macos.tar -C build
+          tar -xf "$RUNNER_TEMP/steam-linux/steam-linux.tar" -C build
+          tar -xf "$RUNNER_TEMP/steam-macos/steam-macos.tar" -C build
 
           for VAR_NAME in STEAM_APP_ID DEPOT_WIN DEPOT_LIN DEPOT_MAC; do
             VAL="${!VAR_NAME}"

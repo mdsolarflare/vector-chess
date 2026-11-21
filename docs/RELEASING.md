@@ -1,19 +1,28 @@
 # Store Release & Runner Guide
 
 This repository splits CI/CD into two focused workflows:
-* **[`ci.yml`](../.github/workflows/ci.yml) (`CI & Deploy Web`):** Runs unit tests on every PR/push and automatically deploys the live Web (WASM) build to GitHub Pages on `main`.
+* **[`ci.yml`](../.github/workflows/ci.yml) (`CI & Deploy Web`):** Runs unit tests on every PR/push and automatically deploys the live Web (WASM) build to GitHub Pages on `main`/`master` only after the headless unit test suite passes.
 * **[`release.yml`](../.github/workflows/release.yml) (`Store Release Pipeline`):** Manually triggered once you are happy with the live Web build to build, sign, upload, and tag store releases for **Steam (Windows, Linux/Steam Deck, macOS)**, **Google Play (Android)**, and **Apple App Store / TestFlight (iOS)**.
+
+Both workflows install official Godot Engine binaries and export templates directly from `godotengine/godot` GitHub Releases via the shared [`.github/actions/setup-godot`](../.github/actions/setup-godot/action.yml) composite action and verify every downloaded archive against Godot's official `SHA512-SUMS.txt`.
 
 ## 1. Triggering a Store Release
 
 1. Verify the live Web build deployed by `CI & Deploy Web` on `main`.
 2. Open **Actions → Store Release Pipeline → Run workflow** in GitHub:
-   * **`release_version`:** Enter the semantic version (e.g. `0.2.0`).
-   * **`steam_branch`:** Branch to set live on Steam (`beta`, `default`, or leave blank to upload without setting live).
+   * **`release_version`:** Enter the strict semantic version (e.g. `0.2.0` or `0.2.0-rc.1`, without leading zeros).
+   * **`steam_branch`:** Non-default Steam branch to set live via SteamCMD (e.g. `beta`, or leave blank to upload depots without setting any branch live). **Note:** SteamPipe forbids setting the public `default` branch live via SteamCMD—leave `steam_branch` blank or upload to `beta`, then promote the build to `default` manually in the Steamworks Partner web portal.
    * **`upload_to_stores`:** Keep checked to push directly to Steam, Google Play, and App Store Connect (when secrets exist), or uncheck for a dry-run build.
    * **`create_github_release`:** Keep checked to automatically create git tag `v<release_version>` and publish a GitHub Release with all built packages attached.
 
 *(Even before store secrets are configured, running the workflow builds all packages using ephemeral/ad-hoc signing so you can download and inspect artifacts.)*
+
+### Store Versioning & Build Metadata
+Before exporting, each build job in `release.yml` computes deterministic, strictly monotonic build numbers from its own `github.run_number` and `github.run_attempt`:
+* **`build_version` (`run_number * 100 + run_attempt`):** Monotonically increases on every new workflow run, every full re-run, *and* every "Re-run failed jobs" attempt, preventing duplicate upload rejections across Google Play and App Store Connect.
+* **Android (`.aab` & `.apk`):** Stamps `version/code = build_version` and `version/name = release_version` into both Android presets in `export_presets.cfg`.
+* **macOS & iOS (`.app` & `.ipa`):** Stamps `application/short_version` (`CFBundleShortVersionString`) with the numeric marketing version (`release_version` with any `-prerelease` suffix stripped) and `application/version` (`CFBundleVersion`) with `build_version`.
+* **Windows (`.exe`):** Stamps `application/file_version` and `application/product_version` with `<short_version>.<((build_version - 1) % 65535) + 1>` (non-zero 4-part PE version). Godot 4.7 modifies PE icons and version metadata natively (`TemplateModifier`, no `rcedit`/`wine` required), and [`.github/scripts/verify_windows_pe.py`](../.github/scripts/verify_windows_pe.py) verifies the exported `VectorChess.exe` PE `VS_FIXEDFILEINFO` and `StringFileInfo` fields and confirms every `RT_ICON` entry differs from both the stock Godot template and Godot's solid-blue fallback icon.
 
 ---
 
@@ -47,7 +56,7 @@ Generate an Upload Keystore once on any machine with Java installed:
 ```bash
 keytool -genkeypair -v -keystore vector-chess-upload.keystore \
   -alias vectorchess -keyalg RSA -keysize 2048 -validity 10000
-base64 -i vector-chess-upload.keystore > keystore.b64
+base64 < vector-chess-upload.keystore > keystore.b64
 ```
 
 | Type | Name | Description |
@@ -60,7 +69,7 @@ base64 -i vector-chess-upload.keystore > keystore.b64
 ---
 
 ### B. Apple — macOS (Steam) & iOS (App Store / TestFlight)
-Export signing certificates as `.p12` files from Keychain Access and base64-encode them (`base64 -i cert.p12`). Create an App Store Connect API Key (`.p8`) under **App Store Connect → Users and Access → Integrations → App Store Connect API**.
+Export signing certificates as `.p12` files from Keychain Access and base64-encode them (`base64 < cert.p12`). Create an App Store Connect API Key (`.p8`) under **App Store Connect → Users and Access → Integrations → App Store Connect API**.
 
 | Type | Name | Description |
 | :--- | :--- | :--- |

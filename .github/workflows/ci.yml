@@ -9,13 +9,15 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 defaults:
   run:
     shell: bash
 
 env:
-  GODOT_VERSION: "4.7.2"
-  RELEASE_TYPE: "stable"
   EXPORT_PRESET: "Web"
   BUILD_PATH: "build/web"
 
@@ -27,22 +29,8 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Download & Install Godot Binary
-        env:
-          GODOT_BASE_URL: "https://github.com/godotengine/godot/releases/download/${{ env.GODOT_VERSION }}-${{ env.RELEASE_TYPE }}"
-          GODOT_ZIP: "Godot_v${{ env.GODOT_VERSION }}-${{ env.RELEASE_TYPE }}_linux.x86_64.zip"
-        run: |
-          GODOT_DIR="$HOME/.cache/godot/${GODOT_VERSION}-${RELEASE_TYPE}"
-          if [ ! -x "${GODOT_DIR}/godot" ]; then
-            mkdir -p "${GODOT_DIR}"
-            curl -fsSL --retry 3 --retry-delay 2 "${GODOT_BASE_URL}/${GODOT_ZIP}" -o "$RUNNER_TEMP/${GODOT_ZIP}"
-            unzip -q -o "$RUNNER_TEMP/${GODOT_ZIP}" -d "${GODOT_DIR}"
-            mv -f "${GODOT_DIR}/Godot_v${GODOT_VERSION}-${RELEASE_TYPE}_linux.x86_64" "${GODOT_DIR}/godot"
-            chmod +x "${GODOT_DIR}/godot"
-            rm -f "$RUNNER_TEMP/${GODOT_ZIP}"
-          fi
-          echo "${GODOT_DIR}" >> "$GITHUB_PATH"
-          "${GODOT_DIR}/godot" --version
+      - name: Setup Official Godot Binary
+        uses: ./.github/actions/setup-godot
 
       - name: Import Project Resources Headlessly
         run: |
@@ -60,35 +48,10 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Download & Install Godot Binary
-        env:
-          GODOT_BASE_URL: "https://github.com/godotengine/godot/releases/download/${{ env.GODOT_VERSION }}-${{ env.RELEASE_TYPE }}"
-          GODOT_ZIP: "Godot_v${{ env.GODOT_VERSION }}-${{ env.RELEASE_TYPE }}_linux.x86_64.zip"
-        run: |
-          GODOT_DIR="$HOME/.cache/godot/${GODOT_VERSION}-${RELEASE_TYPE}"
-          if [ ! -x "${GODOT_DIR}/godot" ]; then
-            mkdir -p "${GODOT_DIR}"
-            curl -fsSL --retry 3 --retry-delay 2 "${GODOT_BASE_URL}/${GODOT_ZIP}" -o "$RUNNER_TEMP/${GODOT_ZIP}"
-            unzip -q -o "$RUNNER_TEMP/${GODOT_ZIP}" -d "${GODOT_DIR}"
-            mv -f "${GODOT_DIR}/Godot_v${GODOT_VERSION}-${RELEASE_TYPE}_linux.x86_64" "${GODOT_DIR}/godot"
-            chmod +x "${GODOT_DIR}/godot"
-            rm -f "$RUNNER_TEMP/${GODOT_ZIP}"
-          fi
-          echo "${GODOT_DIR}" >> "$GITHUB_PATH"
-          "${GODOT_DIR}/godot" --version
-
-      - name: Download & Install Web Export Templates
-        env:
-          GODOT_BASE_URL: "https://github.com/godotengine/godot/releases/download/${{ env.GODOT_VERSION }}-${{ env.RELEASE_TYPE }}"
-          TEMPLATES_TPZ: "Godot_v${{ env.GODOT_VERSION }}-${{ env.RELEASE_TYPE }}_export_templates.tpz"
-        run: |
-          TEMPLATE_DIR="$HOME/.local/share/godot/export_templates/${GODOT_VERSION}.${RELEASE_TYPE}"
-          if [ ! -f "${TEMPLATE_DIR}/version.txt" ] || [ ! -f "${TEMPLATE_DIR}/web_nothreads_release.zip" ]; then
-            mkdir -p "${TEMPLATE_DIR}"
-            curl -fsSL --retry 3 --retry-delay 2 "${GODOT_BASE_URL}/${TEMPLATES_TPZ}" -o "$RUNNER_TEMP/${TEMPLATES_TPZ}"
-            unzip -j -q -o "$RUNNER_TEMP/${TEMPLATES_TPZ}" 'templates/web_*.zip' 'templates/version.txt' -d "${TEMPLATE_DIR}"
-            rm -f "$RUNNER_TEMP/${TEMPLATES_TPZ}"
-          fi
+      - name: Setup Official Godot Binary & Web Templates
+        uses: ./.github/actions/setup-godot
+        with:
+          templates: web
 
       - name: Import Project & Export Web Build
         env:
@@ -128,19 +91,22 @@ jobs:
           test -f "${BUILD_PATH}/index.js"
 
       - name: Upload Pages Artifact
-        if: github.event_name != 'pull_request'
-        uses: actions/upload-pages-artifact@v3
+        if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+        uses: actions/upload-pages-artifact@v5
         with:
           path: ${{ env.BUILD_PATH }}
 
   deploy-web:
     name: Deploy Live Web Build to GitHub Pages
     needs: build-web
-    if: github.event_name != 'pull_request'
+    if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
     runs-on: ubuntu-latest
     permissions:
       pages: write
       id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
     concurrency:
       group: "pages"
       cancel-in-progress: false
