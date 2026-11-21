@@ -41,6 +41,8 @@ func _run_all_tests() -> void:
 	await _test_vector_arrow_label_centering_and_draw()
 	_test_hex_tile_color_variation()
 	_test_mobile_scaling_and_responsive_layout()
+	await _test_pending_promotion_cancel_and_undo()
+	await _test_ui_layout_non_overlap_and_resource_isolation()
 
 	print("========================================")
 	print("Tests run: %d | Failed: %d" % [_tests_run, _tests_failed])
@@ -1439,3 +1441,514 @@ func _test_mobile_scaling_and_responsive_layout() -> void:
 	)
 
 	main_ui.free()
+
+
+func _test_pending_promotion_cancel_and_undo() -> void:
+	print("\n-- Pending Pawn Promotion Cancel & Undo Behavior (Issue #36) --")
+	var main_ui: Control = MainScene.instantiate()
+	root.add_child(main_ui)
+	main_ui.new_game_modal.visible = false
+	main_ui.is_single_player = true
+	main_ui.human_team = PieceData.Team.CYAN
+
+	var board: VectorBoard = main_ui.vector_board
+	board.size = Vector2(800, 600)
+	board._compute_board_metrics()
+
+	# Setup a clean position with a Cyan pawn ready to promote (f10 -> f11) and 2 committed moves in history
+	var rules := board.rules
+	rules.pieces.clear()
+	rules.move_history.clear()
+	rules.current_turn = PieceData.Team.CYAN
+	rules.is_game_over = false
+	rules.last_move = null
+	rules.status_text = "Cyan's Turn"
+	rules._spawn_piece(PieceData.Team.CYAN, PieceData.Type.KING, GameRules.algebraic_to_axial("a1"))
+	rules._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.KING, GameRules.algebraic_to_axial("l1"))
+	var cyan_rook := rules._spawn_piece(PieceData.Team.CYAN, PieceData.Type.ROOK, GameRules.algebraic_to_axial("c1"))
+	var mag_rook := rules._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.ROOK, GameRules.algebraic_to_axial("i1"))
+	var promo_pawn := rules._spawn_piece(PieceData.Team.CYAN, PieceData.Type.PAWN, GameRules.algebraic_to_axial("f10"))
+	rules._rebuild_spatial_index()
+	board._rebuild_board_cache()
+
+	# Commit 1 full round (Cyan move + Magenta move) so move_history.size() == 2
+	var c2 := GameRules.algebraic_to_axial("c2")
+	for mv in rules.get_legal_moves_for_piece(cyan_rook):
+		if mv.to == c2:
+			rules.execute_move(mv)
+			break
+	var i2 := GameRules.algebraic_to_axial("i2")
+	for mv in rules.get_legal_moves_for_piece(mag_rook):
+		if mv.to == i2:
+			rules.execute_move(mv)
+			break
+	board._rebuild_board_cache()
+	main_ui._refresh_hud()
+
+	var f10 := GameRules.algebraic_to_axial("f10")
+	var f11 := GameRules.algebraic_to_axial("f11")
+	_assert(
+		rules.move_history.size() == 2 and rules.current_turn == PieceData.Team.CYAN,
+		"Setup: 2 prior moves committed and Cyan pawn positioned on f10"
+	)
+
+	# 1. Pre-existing desktop hover clears on promotion trigger, hidden SidePanel auto-opens, and _draw() renders pending highlight
+	main_ui.side_panel.visible = false
+	board._handle_cell_interaction(f10)
+	var hover_f11 := InputEventMouseMotion.new()
+	hover_f11.device = 0
+	hover_f11.position = board._axial_to_screen(Vector2(f11))
+	board._gui_input(hover_f11)
+	var had_hover_target: bool = main_ui.telemetry_label.text.contains("Target:")
+	board._handle_cell_interaction(f11)
+	board.queue_redraw()
+	await process_frame
+	await process_frame
+	_assert(
+		had_hover_target
+		and board.pending_promotion_move != null
+		and board.hovered_cell == GameRules.INVALID_HEX
+		and board.hovered_move == null
+		and not main_ui.telemetry_label.text.contains("Target:")
+		and main_ui.side_panel.visible
+		and main_ui.promotion_box.visible
+		and main_ui.promote_cancel_button != null
+		and main_ui.status_label.text == "Select Promotion Piece"
+		and main_ui.undo_button.tooltip_text == "Cancel Promotion"
+		and rules.move_history.size() == 2,
+		"Clicking promotion square f11 clears desktop hover/Target telemetry, auto-opens SidePanel, and renders pending prompt without committing"
+	)
+
+	# Cancel via PromotionBox Cancel button
+	main_ui.promote_cancel_button.pressed.emit()
+	_assert(
+		board.pending_promotion_move == null
+		and not main_ui.promotion_box.visible
+		and board.selected_piece == null
+		and board.hovered_cell == GameRules.INVALID_HEX
+		and board.hovered_move == null
+		and main_ui.status_label.text == "Cyan's Turn"
+		and main_ui.undo_button.tooltip_text == "Undo Last Move"
+		and rules.move_history.size() == 2
+		and promo_pawn.grid_pos == f10
+		and promo_pawn.type == PieceData.Type.PAWN,
+		"Pressing PromotionBox Cancel button cleanly cancels pending promotion without popping move_history"
+	)
+
+	# 2. Cancel via Escape (ui_cancel) dispatched through SceneTree root.push_input, guarded when NewGameModal is visible
+	board._handle_cell_interaction(f10)
+	board._handle_cell_interaction(f11)
+	var esc_ev := InputEventKey.new()
+	esc_ev.keycode = KEY_ESCAPE
+	esc_ev.pressed = true
+	main_ui.new_game_modal.visible = true
+	root.push_input(esc_ev)
+	_assert(
+		board.pending_promotion_move != null and main_ui.promotion_box.visible,
+		"Escape does not cancel pending promotion while NewGameModal is open"
+	)
+	main_ui.new_game_modal.visible = false
+	root.push_input(esc_ev)
+	_assert(
+		board.pending_promotion_move == null
+		and not main_ui.promotion_box.visible
+		and main_ui.status_label.text == "Cyan's Turn"
+		and rules.move_history.size() == 2,
+		"Escape (ui_cancel via root.push_input) cancels pending promotion and restores HUD state"
+	)
+
+	# 3. Cancel via clicking/tapping outside on the board (desktop left-click, right-click, and touch-emulated tap)
+	board._handle_cell_interaction(f10)
+	board._handle_cell_interaction(f11)
+	var click_c2 := InputEventMouseButton.new()
+	click_c2.button_index = MOUSE_BUTTON_LEFT
+	click_c2.pressed = true
+	click_c2.position = board._axial_to_screen(Vector2(c2))
+	board._gui_input(click_c2)
+	_assert(
+		board.pending_promotion_move == null
+		and not main_ui.promotion_box.visible
+		and board.selected_piece == null
+		and rules.move_history.size() == 2,
+		"Left-clicking on the board while promotion is pending cancels promotion instead of locking board"
+	)
+
+	board._gui_input(click_c2)
+	_assert(
+		board.selected_piece == cyan_rook,
+		"After canceling promotion, player can immediately select another friendly piece (Rook on c2)"
+	)
+
+	# Right-click also cancels pending promotion
+	board._handle_cell_interaction(f10)
+	board._handle_cell_interaction(f11)
+	var rclick := InputEventMouseButton.new()
+	rclick.button_index = MOUSE_BUTTON_RIGHT
+	rclick.pressed = true
+	rclick.position = board._axial_to_screen(Vector2(c2))
+	board._gui_input(rclick)
+	_assert(
+		board.pending_promotion_move == null and not main_ui.promotion_box.visible,
+		"Right-clicking on the board cancels pending promotion"
+	)
+
+	# Touch-emulated tap (DEVICE_ID_EMULATION) cancels pending promotion cleanly
+	board._handle_cell_interaction(f10)
+	board._handle_cell_interaction(f11)
+	var touch_tap := InputEventMouseButton.new()
+	touch_tap.device = InputEvent.DEVICE_ID_EMULATION
+	touch_tap.button_index = MOUSE_BUTTON_LEFT
+	touch_tap.pressed = true
+	touch_tap.position = board._axial_to_screen(Vector2(c2))
+	board._gui_input(touch_tap)
+	_assert(
+		board.pending_promotion_move == null
+		and not main_ui.promotion_box.visible
+		and board.hovered_cell == GameRules.INVALID_HEX,
+		"Touch-emulated tap on the board cancels pending promotion cleanly"
+	)
+
+	# Flipping board while promotion is pending keeps pending state intact until user confirms or cancels
+	board._handle_cell_interaction(f10)
+	board._handle_cell_interaction(f11)
+	main_ui._on_flip_pressed()
+	_assert(
+		board.board_flipped and board.pending_promotion_move != null and main_ui.promotion_box.visible,
+		"Flipping board while promotion is pending preserves pending promotion state"
+	)
+	main_ui._on_flip_pressed()
+
+	# 4. Undo while promotion is pending cancels promotion FIRST without popping prior committed turns (1P mode)
+	main_ui._on_undo_pressed()
+	_assert(
+		board.pending_promotion_move == null
+		and not main_ui.promotion_box.visible
+		and board.selected_piece == null
+		and main_ui.status_label.text == "Cyan's Turn"
+		and rules.move_history.size() == 2
+		and cyan_rook.grid_pos == c2
+		and mag_rook.grid_pos == i2,
+		"Undo during pending promotion cancels promotion and keeps all 2 prior committed turns intact"
+	)
+
+	# 2P Pass & Play Undo: first Undo cancels promotion, second Undo pops ONLY 1 half-move (returning to Magenta)
+	main_ui.is_single_player = false
+	board._handle_cell_interaction(f10)
+	board._handle_cell_interaction(f11)
+	main_ui._on_undo_pressed()
+	_assert(
+		board.pending_promotion_move == null and rules.move_history.size() == 2 and rules.current_turn == PieceData.Team.CYAN,
+		"2P Undo during pending promotion cancels promotion without popping move_history"
+	)
+	main_ui._on_undo_pressed()
+	_assert(
+		rules.move_history.size() == 1 and rules.current_turn == PieceData.Team.MAGENTA,
+		"2P subsequent Undo pops exactly 1 half-move and returns turn to Magenta"
+	)
+
+	# Re-commit Magenta move so we also test 1P subsequent Undo popping full 2-ply round
+	var mag_rook_now := rules.get_piece_at(GameRules.algebraic_to_axial("i1"))
+	for mv in rules.get_legal_moves_for_piece(mag_rook_now):
+		if mv.to == i2:
+			rules.execute_move(mv)
+			break
+	board._rebuild_board_cache()
+	main_ui.is_single_player = true
+	main_ui._refresh_hud()
+
+	main_ui._on_undo_pressed()
+	var restored_rook := rules.get_piece_at(GameRules.algebraic_to_axial("c1"))
+	_assert(
+		rules.move_history.is_empty()
+		and rules.current_turn == PieceData.Team.CYAN
+		and restored_rook != null
+		and restored_rook.type == PieceData.Type.ROOK
+		and main_ui.undo_button.disabled,
+		"1P subsequent Undo after promotion cancellation reverts the previous committed 2-ply turn cleanly"
+	)
+
+	# 5. Undo button enabled during pending promotion even with empty move_history, and direct board.undo_move() emits promotion_canceled
+	board._handle_cell_interaction(f10)
+	board._handle_cell_interaction(f11)
+	_assert(
+		not main_ui.undo_button.disabled and main_ui.undo_button.tooltip_text == "Cancel Promotion",
+		"Undo button is enabled as 'Cancel Promotion' while promotion is pending even with empty move_history"
+	)
+	var canceled_count := [0]
+	var on_cancel := func() -> void:
+		canceled_count[0] += 1
+	board.promotion_canceled.connect(on_cancel)
+	var direct_undone := board.undo_move()
+	board.promotion_canceled.disconnect(on_cancel)
+	_assert(
+		not direct_undone
+		and canceled_count[0] == 1
+		and board.pending_promotion_move == null
+		and not main_ui.promotion_box.visible
+		and main_ui.undo_button.disabled,
+		"Direct VectorBoard.undo_move() with empty move_history cancels pending promotion and emits promotion_canceled"
+	)
+
+	# 6. Canceling a promotion while Cyan King is in check restores 'Cyan is in CHECK!' status text
+	# Place Magenta Rook at f11 (0, -5) and Cyan King at a6 (-5, 0) along the (-1, +1) orthogonal ray,
+	# with Cyan Pawn on e10 (-1, -4) capturing f11 to resolve check via capture-promotion.
+	rules.pieces.clear()
+	rules.move_history.clear()
+	rules.current_turn = PieceData.Team.CYAN
+	rules.is_game_over = false
+	rules._spawn_piece(PieceData.Team.CYAN, PieceData.Type.KING, GameRules.algebraic_to_axial("a6"))
+	rules._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.KING, GameRules.algebraic_to_axial("l1"))
+	rules._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.ROOK, f11)
+	var e10 := GameRules.algebraic_to_axial("e10")
+	rules._spawn_piece(PieceData.Team.CYAN, PieceData.Type.PAWN, e10)
+	rules._rebuild_spatial_index()
+	rules.status_text = "Cyan is in CHECK!"
+	board._rebuild_board_cache()
+	main_ui._refresh_hud()
+	board._handle_cell_interaction(e10)
+	board._handle_cell_interaction(f11)
+	_assert(
+		board.pending_promotion_move != null and main_ui.status_label.text == "Select Promotion Piece",
+		"Capture-promotion e10xf11 while in check enters pending promotion prompt"
+	)
+	main_ui._on_undo_pressed()
+	_assert(
+		board.pending_promotion_move == null
+		and not main_ui.promotion_box.visible
+		and main_ui.status_label.text == "Cyan is in CHECK!",
+		"Canceling promotion while in check restores 'Cyan is in CHECK!' status label"
+	)
+
+	# 7. Confirming NewGameModal while promotion is pending resets board and hides PromotionBox cleanly
+	board._handle_cell_interaction(e10)
+	board._handle_cell_interaction(f11)
+	main_ui._on_new_game_pressed()
+	main_ui.confirm_slider.value = 100.0
+	main_ui._on_mode_2p_pressed()
+	main_ui._on_confirm_new_game_pressed()
+	_assert(
+		board.pending_promotion_move == null
+		and not main_ui.promotion_box.visible
+		and not main_ui.new_game_modal.visible
+		and rules.pieces.size() == 36,
+		"Confirming NewGameModal while promotion is pending clears pending promotion and resets board"
+	)
+
+	# 8. Completing promotion after previous cancellations commits cleanly
+	rules.pieces.clear()
+	rules.move_history.clear()
+	rules.current_turn = PieceData.Team.CYAN
+	rules.is_game_over = false
+	rules._spawn_piece(PieceData.Team.CYAN, PieceData.Type.KING, GameRules.algebraic_to_axial("a1"))
+	rules._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.KING, GameRules.algebraic_to_axial("l1"))
+	rules._spawn_piece(PieceData.Team.CYAN, PieceData.Type.PAWN, f10)
+	rules._rebuild_spatial_index()
+	board._rebuild_board_cache()
+	board._handle_cell_interaction(f10)
+	board._handle_cell_interaction(f11)
+	main_ui._on_promote_queen_pressed()
+	var promoted_queen := rules.get_piece_at(f11)
+	_assert(
+		board.pending_promotion_move == null
+		and not main_ui.promotion_box.visible
+		and promoted_queen != null
+		and promoted_queen.type == PieceData.Type.QUEEN
+		and rules.move_history.size() == 1,
+		"Completing promotion after prior cancellations promotes pawn to Queen and commits move"
+	)
+
+	main_ui.free()
+
+
+func _test_ui_layout_non_overlap_and_resource_isolation() -> void:
+	print("\n-- UI Layout Non-Overlap, Dead UI Cleanup & StyleBoxFlat Isolation (Issues #15 & #44) --")
+	var main_a: Control = MainScene.instantiate()
+	var main_b: Control = MainScene.instantiate()
+	root.add_child(main_a)
+	root.add_child(main_b)
+
+	# 1. Dead SliderHintLabel node removed (Issue #44)
+	_assert(
+		main_a.get_node_or_null("%SliderHintLabel") == null
+		and main_a.modal_vbox.get_node_or_null("SliderHintLabel") == null,
+		"Dead SliderHintLabel node has been removed from NewGameModal"
+	)
+	main_a.confirm_slider.value = 100.0
+	_assert(
+		not main_a.confirm_new_game_button.disabled,
+		"ConfirmSlider unlocks ConfirmNewGameButton without dead SliderHintLabel updates"
+	)
+
+	# 2. StyleBoxFlat subresources are resource_local_to_scene and isolated across MainScene instances & PackedScene template (Issue #44)
+	main_a._apply_responsive_layout(Vector2(480, 800), true)
+	main_b._apply_responsive_layout(Vector2(1280, 800), false)
+	var panel_style_a := main_a.side_panel.get_theme_stylebox("panel") as StyleBoxFlat
+	var panel_style_b := main_b.side_panel.get_theme_stylebox("panel") as StyleBoxFlat
+	var modal_style_a := main_a.modal_panel.get_theme_stylebox("panel") as StyleBoxFlat
+	var modal_style_b := main_b.modal_panel.get_theme_stylebox("panel") as StyleBoxFlat
+	var banner_style_a := main_a.gpu_warning_banner.get_theme_stylebox("panel") as StyleBoxFlat
+	var banner_style_b := main_b.gpu_warning_banner.get_theme_stylebox("panel") as StyleBoxFlat
+	_assert(
+		panel_style_a != null
+		and panel_style_b != null
+		and panel_style_a != panel_style_b
+		and panel_style_a.content_margin_left == 10.0
+		and panel_style_b.content_margin_left == 14.0,
+		"SidePanel StyleBoxFlat is local to scene: mobile margins (10px) do not mutate desktop instance (14px)"
+	)
+	_assert(
+		modal_style_a != null
+		and modal_style_b != null
+		and modal_style_a != modal_style_b
+		and modal_style_a.content_margin_left == 16.0
+		and modal_style_b.content_margin_left == 22.0,
+		"ModalPanel StyleBoxFlat is local to scene: mobile margins (16px) do not mutate desktop instance (22px)"
+	)
+	_assert(
+		banner_style_a != null and banner_style_b != null and banner_style_a != banner_style_b,
+		"GpuWarningBanner StyleBoxFlat is local to scene across MainScene instances"
+	)
+	# Instantiate a fresh scene AFTER mutating main_a to verify PackedScene template was not mutated
+	var main_fresh: Control = MainScene.instantiate()
+	var fresh_panel_style := main_fresh.get_node("%SidePanel").get_theme_stylebox("panel") as StyleBoxFlat
+	var fresh_modal_style := main_fresh.get_node("%ModalPanel").get_theme_stylebox("panel") as StyleBoxFlat
+	_assert(
+		fresh_panel_style != null
+		and fresh_panel_style.content_margin_left == 14.0
+		and fresh_modal_style != null
+		and fresh_modal_style.content_margin_left == 22.0,
+		"Fresh MainScene instantiated after mobile layout mutation still starts with untouched desktop StyleBoxFlat defaults"
+	)
+	main_fresh.free()
+	main_b.free()
+
+	# 3. GpuWarningBanner renders behind NewGameModal in scene tree so it never occludes the startup modal
+	_assert(
+		main_a.gpu_warning_banner.get_index() < main_a.new_game_modal.get_index(),
+		"GpuWarningBanner precedes NewGameModal in Main scene tree so startup modal is never occluded"
+	)
+
+	# 4. Non-overlapping rects across Narrow Portrait, Mobile Portrait, Desktop Portrait, Compact/Mobile Landscape, and Desktop Landscape
+	#    Uses longest realistic subtitle, long unbroken adapter string, and checks PromotionBox + SidePanel toggle states.
+	main_a.new_game_modal.visible = false
+	main_a.side_panel.visible = true
+	main_a._apply_software_renderer_fallback("ANGLE_SwiftShader_Software_WebGL_UnbrokenAdapterName_1234567890")
+	main_a.subtitle_label.text = "1P vs CPU (Medium) • You: #2 Magenta"
+	main_a.status_label.text = "Magenta (CPU) Thinking..."
+	main_a.set_anchors_preset(Control.PRESET_TOP_LEFT)
+
+	var viewports := [
+		{"name": "Narrow Portrait 360x640", "size": Vector2(360, 640), "mobile": true, "portrait": true},
+		{"name": "Mobile Portrait 480x1040", "size": Vector2(480, 1040), "mobile": true, "portrait": true},
+		{"name": "Desktop Portrait 800x1280", "size": Vector2(800, 1280), "mobile": false, "portrait": true},
+		{"name": "Compact Landscape 800x480", "size": Vector2(800, 480), "mobile": true, "portrait": false},
+		{"name": "Mobile Landscape 1040x480", "size": Vector2(1040, 480), "mobile": true, "portrait": false},
+		{"name": "Desktop Landscape 1280x800", "size": Vector2(1280, 800), "mobile": false, "portrait": false},
+	]
+
+	var narrow_banner_h: float = 0.0
+	var desktop_banner_h: float = 0.0
+
+	for vp in viewports:
+		var vp_name: String = vp["name"]
+		var vp_size: Vector2 = vp["size"]
+		var is_mob: bool = vp["mobile"]
+		var is_port: bool = vp["portrait"]
+		main_a.position = Vector2.ZERO
+		main_a.size = vp_size
+		main_a.side_panel.visible = true
+		main_a.promotion_box.visible = (vp_name == "Compact Landscape 800x480" or vp_name == "Mobile Portrait 480x1040")
+		main_a._apply_responsive_layout(vp_size, is_mob)
+		await process_frame
+		await process_frame
+
+		var toggle_rect: Rect2 = main_a.toggle_panel_button.get_global_rect()
+		var banner_rect: Rect2 = main_a.gpu_warning_banner.get_global_rect()
+		var side_rect: Rect2 = main_a.side_panel.get_global_rect()
+		var subtitle_rect: Rect2 = main_a.subtitle_label.get_global_rect()
+		var status_rect: Rect2 = main_a.status_label.get_global_rect()
+		var telemetry_rect: Rect2 = main_a.telemetry_label.get_global_rect()
+		var promo_clear: bool = (
+			not main_a.promotion_box.visible
+			or not main_a.promotion_box.get_global_rect().intersects(toggle_rect)
+		)
+		var title_clear: bool = (
+			not main_a.title_label.visible
+			or not main_a.title_label.get_global_rect().intersects(toggle_rect)
+		)
+		var banner_clears_side: bool = is_port or not banner_rect.intersects(side_rect)
+
+		if vp_name == "Narrow Portrait 360x640":
+			narrow_banner_h = banner_rect.size.y
+		elif vp_name == "Desktop Landscape 1280x800":
+			desktop_banner_h = banner_rect.size.y
+
+		_assert(
+			main_a.gpu_warning_banner.visible
+			and main_a.gpu_warning_label.autowrap_mode == TextServer.AUTOWRAP_WORD_SMART
+			and not banner_rect.intersects(toggle_rect)
+			and banner_rect.end.x < toggle_rect.position.x
+			and banner_clears_side,
+			"%s: GpuWarningBanner (%s) clears TogglePanelButton (%s) and SidePanel in landscape" % [
+				vp_name,
+				str(banner_rect),
+				str(toggle_rect),
+			]
+		)
+		_assert(
+			title_clear
+			and not subtitle_rect.intersects(toggle_rect)
+			and not status_rect.intersects(toggle_rect)
+			and promo_clear
+			and not telemetry_rect.intersects(toggle_rect),
+			"%s: TogglePanelButton (%s) does not overlap SidePanel text/promotion (subtitle=%s, status=%s)" % [
+				vp_name,
+				str(toggle_rect),
+				str(subtitle_rect),
+				str(status_rect),
+			]
+		)
+
+	_assert(
+		narrow_banner_h > desktop_banner_h and desktop_banner_h > 0.0,
+		"GpuWarningBanner shrinks cleanly from narrow portrait (%.0fpx) back to desktop landscape (%.0fpx)" % [
+			narrow_banner_h,
+			desktop_banner_h,
+		]
+	)
+
+	# 5. Toggling SidePanel hidden in landscape expands GpuWarningBanner while still clearing TogglePanelButton,
+	#    and toggling SidePanel back restores board-width docking without overlapping SidePanel.
+	main_a.position = Vector2.ZERO
+	main_a.size = Vector2(1280, 800)
+	main_a.side_panel.visible = true
+	main_a._apply_responsive_layout(Vector2(1280, 800), false)
+	await process_frame
+	var docked_banner_w: float = main_a.gpu_warning_banner.get_global_rect().size.x
+	main_a._on_toggle_panel_pressed()
+	await process_frame
+	await process_frame
+	var expanded_banner_rect: Rect2 = main_a.gpu_warning_banner.get_global_rect()
+	var toggle_rect_after: Rect2 = main_a.toggle_panel_button.get_global_rect()
+	_assert(
+		not main_a.side_panel.visible
+		and expanded_banner_rect.size.x > docked_banner_w
+		and not expanded_banner_rect.intersects(toggle_rect_after)
+		and expanded_banner_rect.end.x < toggle_rect_after.position.x,
+		"Hiding SidePanel in landscape expands GpuWarningBanner (%.0f -> %.0fpx) while keeping clearance before TogglePanelButton" % [
+			docked_banner_w,
+			expanded_banner_rect.size.x,
+		]
+	)
+	main_a._on_toggle_panel_pressed()
+	await process_frame
+	await process_frame
+	var redocked_banner_rect: Rect2 = main_a.gpu_warning_banner.get_global_rect()
+	_assert(
+		main_a.side_panel.visible
+		and not redocked_banner_rect.intersects(main_a.side_panel.get_global_rect())
+		and not redocked_banner_rect.intersects(main_a.toggle_panel_button.get_global_rect()),
+		"Re-showing SidePanel re-docks GpuWarningBanner cleanly left of SidePanel and TogglePanelButton"
+	)
+
+	main_a.free()

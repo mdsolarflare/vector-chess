@@ -4,6 +4,7 @@
 [ext_resource type="Script" uid="uid://cvhh1gp73ye63" path="res://scripts/board/vector_board.gd" id="2_board"]
 
 [sub_resource type="StyleBoxFlat" id="StyleBoxFlat_panel"]
+resource_local_to_scene = true
 bg_color = Color(0.0627451, 0.0784314, 0.129412, 0.95)
 border_width_left = 2
 border_width_top = 2
@@ -20,6 +21,7 @@ content_margin_right = 14.0
 content_margin_bottom = 14.0
 
 [sub_resource type="StyleBoxFlat" id="StyleBoxFlat_modal"]
+resource_local_to_scene = true
 bg_color = Color(0.055, 0.07, 0.12, 0.98)
 border_width_left = 2
 border_width_top = 2
@@ -36,6 +38,7 @@ content_margin_right = 22.0
 content_margin_bottom = 20.0
 
 [sub_resource type="StyleBoxFlat" id="StyleBoxFlat_banner"]
+resource_local_to_scene = true
 bg_color = Color(0.14, 0.09, 0.03, 0.96)
 border_width_left = 2
 border_width_top = 2
@@ -96,19 +99,38 @@ unique_name_in_owner = true
 layout_mode = 2
 theme_override_constants/separation = 10
 
-[node name="TitleLabel" type="Label" parent="MarginContainer/MainLayout/SidePanel/VBox"]
+[node name="PanelHeaderRow" type="HBoxContainer" parent="MarginContainer/MainLayout/SidePanel/VBox"]
+unique_name_in_owner = true
+layout_mode = 2
+theme_override_constants/separation = 8
+
+[node name="HeaderTextVBox" type="VBoxContainer" parent="MarginContainer/MainLayout/SidePanel/VBox/PanelHeaderRow"]
+layout_mode = 2
+size_flags_horizontal = 3
+size_flags_vertical = 4
+theme_override_constants/separation = 4
+
+[node name="TitleLabel" type="Label" parent="MarginContainer/MainLayout/SidePanel/VBox/PanelHeaderRow/HeaderTextVBox"]
 unique_name_in_owner = true
 layout_mode = 2
 theme_override_colors/font_color = Color(0.92, 0.96, 1, 1)
 theme_override_font_sizes/font_size = 24
 text = "VECTOR CHESS"
+autowrap_mode = 3
 
-[node name="SubtitleLabel" type="Label" parent="MarginContainer/MainLayout/SidePanel/VBox"]
+[node name="SubtitleLabel" type="Label" parent="MarginContainer/MainLayout/SidePanel/VBox/PanelHeaderRow/HeaderTextVBox"]
 unique_name_in_owner = true
 layout_mode = 2
 theme_override_colors/font_color = Color(0.55, 0.68, 0.85, 1)
 theme_override_font_sizes/font_size = 13
 text = "Glinski Hexagonal Chess - 91 Hexes"
+autowrap_mode = 3
+
+[node name="ToggleButtonSpacer" type="Control" parent="MarginContainer/MainLayout/SidePanel/VBox/PanelHeaderRow"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(38, 42)
+layout_mode = 2
+mouse_filter = 2
 
 [node name="HSeparator1" type="HSeparator" parent="MarginContainer/MainLayout/SidePanel/VBox"]
 unique_name_in_owner = true
@@ -119,6 +141,7 @@ unique_name_in_owner = true
 layout_mode = 2
 theme_override_font_sizes/font_size = 18
 text = "Cyan's Turn"
+autowrap_mode = 3
 
 [node name="PromotionBox" type="VBoxContainer" parent="MarginContainer/MainLayout/SidePanel/VBox"]
 unique_name_in_owner = true
@@ -162,6 +185,13 @@ custom_minimum_size = Vector2(0, 40)
 layout_mode = 2
 size_flags_horizontal = 3
 text = "Knight"
+
+[node name="PromoteCancelBtn" type="Button" parent="MarginContainer/MainLayout/SidePanel/VBox/PromotionBox"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(0, 36)
+layout_mode = 2
+tooltip_text = "Cancel Promotion (Esc)"
+text = "Cancel"
 
 [node name="TelemetryLabel" type="RichTextLabel" parent="MarginContainer/MainLayout/SidePanel/VBox"]
 unique_name_in_owner = true
@@ -238,6 +268,40 @@ offset_right = -24.0
 offset_bottom = 68.0
 grow_horizontal = 0
 tooltip_text = "Hide Side Panel"
+
+[node name="GpuWarningBanner" type="PanelContainer" parent="."]
+unique_name_in_owner = true
+visible = false
+layout_mode = 1
+anchors_preset = 10
+anchor_right = 1.0
+offset_left = 16.0
+offset_top = 24.0
+offset_right = -372.0
+offset_bottom = 64.0
+grow_horizontal = 2
+theme_override_styles/panel = SubResource("StyleBoxFlat_banner")
+
+[node name="BannerHBox" type="HBoxContainer" parent="GpuWarningBanner"]
+layout_mode = 2
+theme_override_constants/separation = 10
+
+[node name="GpuWarningLabel" type="Label" parent="GpuWarningBanner/BannerHBox"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+theme_override_colors/font_color = Color(1, 0.88, 0.55, 1)
+theme_override_font_sizes/font_size = 13
+text = "Software rendering detected. 2D MSAA & line AA disabled — enable Browser Hardware Acceleration for best performance."
+autowrap_mode = 3
+
+[node name="DismissGpuBannerButton" type="Button" parent="GpuWarningBanner/BannerHBox"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(28, 28)
+layout_mode = 2
+size_flags_vertical = 4
+tooltip_text = "Dismiss Warning"
+text = "X"
 
 [node name="NewGameModal" type="ColorRect" parent="."]
 unique_name_in_owner = true
@@ -372,14 +436,6 @@ text = "Hard"
 [node name="ModalSep" type="HSeparator" parent="NewGameModal/CenterContainer/ModalPanel/ModalVBox"]
 layout_mode = 2
 
-[node name="SliderHintLabel" type="Label" parent="NewGameModal/CenterContainer/ModalPanel/ModalVBox"]
-unique_name_in_owner = true
-visible = false
-layout_mode = 2
-theme_override_font_sizes/font_size = 13
-text = "Slide all the way right to unlock >>"
-horizontal_alignment = 1
-
 [node name="ConfirmSlider" type="HSlider" parent="NewGameModal/CenterContainer/ModalPanel/ModalVBox"]
 unique_name_in_owner = true
 custom_minimum_size = Vector2(0, 48)
@@ -407,49 +463,17 @@ size_flags_horizontal = 3
 disabled = true
 tooltip_text = "Confirm New Game"
 
-[node name="GpuWarningBanner" type="PanelContainer" parent="."]
-unique_name_in_owner = true
-visible = false
-layout_mode = 1
-anchors_preset = 10
-anchor_right = 1.0
-offset_left = 16.0
-offset_top = 12.0
-offset_right = -16.0
-offset_bottom = 52.0
-grow_horizontal = 2
-theme_override_styles/panel = SubResource("StyleBoxFlat_banner")
-
-[node name="BannerHBox" type="HBoxContainer" parent="GpuWarningBanner"]
-layout_mode = 2
-theme_override_constants/separation = 10
-
-[node name="GpuWarningLabel" type="Label" parent="GpuWarningBanner/BannerHBox"]
-unique_name_in_owner = true
-layout_mode = 2
-size_flags_horizontal = 3
-theme_override_colors/font_color = Color(1, 0.88, 0.55, 1)
-theme_override_font_sizes/font_size = 13
-text = "Software rendering detected. 2D MSAA & line AA disabled — enable Browser Hardware Acceleration for best performance."
-autowrap_mode = 2
-
-[node name="DismissGpuBannerButton" type="Button" parent="GpuWarningBanner/BannerHBox"]
-unique_name_in_owner = true
-custom_minimum_size = Vector2(28, 28)
-layout_mode = 2
-size_flags_vertical = 4
-tooltip_text = "Dismiss Warning"
-text = "X"
-
 [connection signal="pressed" from="MarginContainer/MainLayout/SidePanel/VBox/PromotionBox/PromoteGrid/PromoteQueenBtn" to="." method="_on_promote_queen_pressed"]
 [connection signal="pressed" from="MarginContainer/MainLayout/SidePanel/VBox/PromotionBox/PromoteGrid/PromoteRookBtn" to="." method="_on_promote_rook_pressed"]
 [connection signal="pressed" from="MarginContainer/MainLayout/SidePanel/VBox/PromotionBox/PromoteGrid/PromoteBishopBtn" to="." method="_on_promote_bishop_pressed"]
 [connection signal="pressed" from="MarginContainer/MainLayout/SidePanel/VBox/PromotionBox/PromoteGrid/PromoteKnightBtn" to="." method="_on_promote_knight_pressed"]
+[connection signal="pressed" from="MarginContainer/MainLayout/SidePanel/VBox/PromotionBox/PromoteCancelBtn" to="." method="_on_promote_cancel_pressed"]
 [connection signal="pressed" from="MarginContainer/MainLayout/SidePanel/VBox/ControlsGrid/NewGameButton" to="." method="_on_new_game_pressed"]
 [connection signal="pressed" from="MarginContainer/MainLayout/SidePanel/VBox/ControlsGrid/UndoButton" to="." method="_on_undo_pressed"]
 [connection signal="pressed" from="MarginContainer/MainLayout/SidePanel/VBox/ControlsGrid/FlipButton" to="." method="_on_flip_pressed"]
 [connection signal="pressed" from="MarginContainer/MainLayout/SidePanel/VBox/ControlsGrid/VectorsButton" to="." method="_on_vectors_pressed"]
 [connection signal="pressed" from="TogglePanelButton" to="." method="_on_toggle_panel_pressed"]
+[connection signal="pressed" from="GpuWarningBanner/BannerHBox/DismissGpuBannerButton" to="." method="_on_dismiss_gpu_banner_pressed"]
 [connection signal="pressed" from="NewGameModal/CenterContainer/ModalPanel/ModalVBox/ModeButtons/Mode1PButton" to="." method="_on_mode_1p_pressed"]
 [connection signal="pressed" from="NewGameModal/CenterContainer/ModalPanel/ModalVBox/ModeButtons/Mode2PButton" to="." method="_on_mode_2p_pressed"]
 [connection signal="pressed" from="NewGameModal/CenterContainer/ModalPanel/ModalVBox/CpuOptionsBox/ColorButtons/ColorCyanButton" to="." method="_on_color_cyan_pressed"]
@@ -461,4 +485,3 @@ text = "X"
 [connection signal="value_changed" from="NewGameModal/CenterContainer/ModalPanel/ModalVBox/ConfirmSlider" to="." method="_on_confirm_slider_value_changed"]
 [connection signal="pressed" from="NewGameModal/CenterContainer/ModalPanel/ModalVBox/ModalButtons/CancelNewGameButton" to="." method="_on_cancel_new_game_pressed"]
 [connection signal="pressed" from="NewGameModal/CenterContainer/ModalPanel/ModalVBox/ModalButtons/ConfirmNewGameButton" to="." method="_on_confirm_new_game_pressed"]
-[connection signal="pressed" from="GpuWarningBanner/BannerHBox/DismissGpuBannerButton" to="." method="_on_dismiss_gpu_banner_pressed"]

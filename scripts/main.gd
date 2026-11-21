@@ -24,12 +24,15 @@ const SOFTWARE_RENDERER_PATTERNS: Array[String] = [
 @onready var vector_board: VectorBoard = %VectorBoard
 @onready var side_panel: PanelContainer = %SidePanel
 @onready var side_panel_vbox: VBoxContainer = %VBox
+@onready var panel_header_row: HBoxContainer = %PanelHeaderRow
+@onready var toggle_button_spacer: Control = %ToggleButtonSpacer
 @onready var title_label: Label = %TitleLabel
 @onready var subtitle_label: Label = %SubtitleLabel
 @onready var h_separator_1: HSeparator = %HSeparator1
 @onready var status_label: Label = %StatusLabel
 @onready var promotion_box: VBoxContainer = %PromotionBox
 @onready var promote_grid: GridContainer = %PromoteGrid
+@onready var promote_cancel_button: Button = %PromoteCancelBtn
 @onready var telemetry_label: RichTextLabel = %TelemetryLabel
 @onready var h_separator_2: HSeparator = %HSeparator2
 @onready var history_header: Label = %HistoryHeader
@@ -55,7 +58,6 @@ const SOFTWARE_RENDERER_PATTERNS: Array[String] = [
 @onready var diff_med_button: Button = %DiffMedButton
 @onready var diff_hard_button: Button = %DiffHardButton
 @onready var confirm_slider: HSlider = %ConfirmSlider
-@onready var slider_hint_label: Label = %SliderHintLabel
 @onready var cancel_new_game_button: Button = %CancelNewGameButton
 @onready var confirm_new_game_button: Button = %ConfirmNewGameButton
 
@@ -77,6 +79,7 @@ var _is_initial_startup: bool = true
 
 ## Responsive UI & slider animation state
 var _is_compact_ui: bool = false
+var _is_portrait_ui: bool = false
 var _slider_anim_time: float = 0.0
 var _line_aa_enabled: bool = true
 
@@ -90,6 +93,7 @@ func _ready() -> void:
 	vector_board.move_executed.connect(_on_move_executed)
 	vector_board.selection_changed.connect(_on_selection_changed)
 	vector_board.promotion_requested.connect(_on_promotion_requested)
+	vector_board.promotion_canceled.connect(_on_promotion_canceled)
 
 	_setup_confirm_slider_theme()
 
@@ -129,6 +133,16 @@ func _process(delta: float) -> void:
 		confirm_slider.queue_redraw()
 
 
+func _unhandled_input(event: InputEvent) -> void:
+	if event.is_action_pressed("ui_cancel"):
+		if new_game_modal != null and new_game_modal.visible:
+			return
+		if vector_board != null and vector_board.pending_promotion_move != null:
+			vector_board.cancel_pending_promotion()
+			if is_inside_tree() and get_viewport() != null:
+				get_viewport().set_input_as_handled()
+
+
 func _setup_confirm_slider_theme() -> void:
 	if confirm_slider == null:
 		return
@@ -154,12 +168,15 @@ func _resolve_nodes() -> void:
 	vector_board = get_node_or_null("%VectorBoard") as VectorBoard
 	side_panel = get_node_or_null("%SidePanel") as PanelContainer
 	side_panel_vbox = get_node_or_null("%VBox") as VBoxContainer
+	panel_header_row = get_node_or_null("%PanelHeaderRow") as HBoxContainer
+	toggle_button_spacer = get_node_or_null("%ToggleButtonSpacer") as Control
 	title_label = get_node_or_null("%TitleLabel") as Label
 	subtitle_label = get_node_or_null("%SubtitleLabel") as Label
 	h_separator_1 = get_node_or_null("%HSeparator1") as HSeparator
 	status_label = get_node_or_null("%StatusLabel") as Label
 	promotion_box = get_node_or_null("%PromotionBox") as VBoxContainer
 	promote_grid = get_node_or_null("%PromoteGrid") as GridContainer
+	promote_cancel_button = get_node_or_null("%PromoteCancelBtn") as Button
 	telemetry_label = get_node_or_null("%TelemetryLabel") as RichTextLabel
 	h_separator_2 = get_node_or_null("%HSeparator2") as HSeparator
 	history_header = get_node_or_null("%HistoryHeader") as Label
@@ -184,7 +201,6 @@ func _resolve_nodes() -> void:
 	diff_med_button = get_node_or_null("%DiffMedButton") as Button
 	diff_hard_button = get_node_or_null("%DiffHardButton") as Button
 	confirm_slider = get_node_or_null("%ConfirmSlider") as HSlider
-	slider_hint_label = get_node_or_null("%SliderHintLabel") as Label
 	cancel_new_game_button = get_node_or_null("%CancelNewGameButton") as Button
 	confirm_new_game_button = get_node_or_null("%ConfirmNewGameButton") as Button
 	gpu_warning_banner = get_node_or_null("%GpuWarningBanner") as PanelContainer
@@ -296,6 +312,7 @@ func _apply_software_renderer_fallback(adapter: String) -> void:
 		)
 	if gpu_warning_banner != null:
 		gpu_warning_banner.visible = true
+		_update_gpu_warning_banner_layout()
 
 
 func _on_dismiss_gpu_banner_pressed() -> void:
@@ -335,6 +352,7 @@ func _apply_responsive_layout(vp_size: Vector2, is_mobile: bool) -> void:
 	var is_compact := is_mobile or minf(vp_size.x, vp_size.y) < 560.0
 	var compact_changed := (_is_compact_ui != is_compact)
 	_is_compact_ui = is_compact
+	_is_portrait_ui = is_portrait
 
 	var outer_margin := 8 if is_compact else 16
 	if margin_container != null:
@@ -346,13 +364,13 @@ func _apply_responsive_layout(vp_size: Vector2, is_mobile: bool) -> void:
 	split_container.add_theme_constant_override("separation", 8 if is_compact else 16)
 	split_container.vertical = is_portrait
 
+	var panel_pad := 10.0 if is_compact else 14.0
 	var panel_style := side_panel.get_theme_stylebox("panel") as StyleBoxFlat
 	if panel_style != null:
-		var pad := 10.0 if is_compact else 14.0
-		panel_style.content_margin_left = pad
-		panel_style.content_margin_top = pad
-		panel_style.content_margin_right = pad
-		panel_style.content_margin_bottom = pad
+		panel_style.content_margin_left = panel_pad
+		panel_style.content_margin_top = panel_pad
+		panel_style.content_margin_right = panel_pad
+		panel_style.content_margin_bottom = panel_pad
 
 	if side_panel_vbox != null:
 		side_panel_vbox.add_theme_constant_override("separation", 6 if is_compact else 10)
@@ -382,9 +400,10 @@ func _apply_responsive_layout(vp_size: Vector2, is_mobile: bool) -> void:
 		if promote_grid != null:
 			promote_grid.columns = 2 if is_compact else 4
 
+	var btn_sz := 54.0 if (is_compact or is_portrait) else 44.0
+	var margin_tr := 12.0 if is_compact else 24.0
+
 	if toggle_panel_button != null:
-		var btn_sz := 54.0 if (is_compact or is_portrait) else 44.0
-		var margin_tr := 12.0 if is_compact else 24.0
 		toggle_panel_button.custom_minimum_size = Vector2(btn_sz, btn_sz)
 		toggle_panel_button.offset_left = -(margin_tr + btn_sz)
 		toggle_panel_button.offset_top = margin_tr
@@ -393,10 +412,47 @@ func _apply_responsive_layout(vp_size: Vector2, is_mobile: bool) -> void:
 		toggle_panel_button.size = Vector2(btn_sz, btn_sz)
 		toggle_panel_button.queue_redraw()
 
+	# Reserve top-right clearance inside SidePanel header in landscape so TogglePanelButton never overlaps menu text
+	if toggle_button_spacer != null:
+		var show_spacer := not is_portrait
+		toggle_button_spacer.visible = show_spacer
+		if show_spacer:
+			var header_sep := 8.0
+			if panel_header_row != null:
+				panel_header_row.add_theme_constant_override("separation", int(header_sep))
+			var intrusion := (margin_tr + btn_sz) - (float(outer_margin) + panel_pad)
+			var spacer_w := maxf(intrusion + 8.0 - header_sep, 0.0)
+			var spacer_h := maxf(intrusion + 4.0, 0.0)
+			toggle_button_spacer.custom_minimum_size = Vector2(spacer_w, spacer_h)
+
+	_update_gpu_warning_banner_layout()
 	_apply_modal_responsive_layout(vp_size, is_compact)
 
 	if compact_changed and vector_board != null:
 		_update_telemetry(vector_board.selected_piece, vector_board.hovered_move)
+
+
+func _update_gpu_warning_banner_layout() -> void:
+	if gpu_warning_banner == null:
+		return
+	var outer_margin := 8.0 if _is_compact_ui else 16.0
+	var btn_sz := 54.0 if (_is_compact_ui or _is_portrait_ui) else 44.0
+	var margin_tr := 12.0 if _is_compact_ui else 24.0
+	var banner_gap := 8.0 if _is_compact_ui else 12.0
+
+	var right_clearance: float
+	if not _is_portrait_ui and side_panel != null and side_panel.visible:
+		# Dock over the VectorBoard width in landscape so neither SidePanel nor TogglePanelButton is covered
+		var split_sep := 8.0 if _is_compact_ui else 16.0
+		var side_w := 248.0 if _is_compact_ui else 340.0
+		right_clearance = outer_margin + side_w + split_sep
+	else:
+		right_clearance = margin_tr + btn_sz + banner_gap
+
+	gpu_warning_banner.offset_left = outer_margin
+	gpu_warning_banner.offset_top = margin_tr
+	gpu_warning_banner.offset_right = -right_clearance
+	gpu_warning_banner.offset_bottom = margin_tr + 40.0
 
 
 func _apply_modal_responsive_layout(vp_size: Vector2, is_compact: bool) -> void:
@@ -432,6 +488,7 @@ func _apply_modal_responsive_layout(vp_size: Vector2, is_compact: bool) -> void:
 func _on_toggle_panel_pressed() -> void:
 	side_panel.visible = not side_panel.visible
 	_update_toggle_panel_button()
+	_update_gpu_warning_banner_layout()
 	vector_board.queue_redraw()
 
 
@@ -450,9 +507,10 @@ func _update_control_buttons() -> void:
 		new_game_button.queue_redraw()
 
 	if undo_button != null and vector_board != null:
+		var has_pending_promo := vector_board.pending_promotion_move != null
 		undo_button.text = ""
-		undo_button.disabled = vector_board.rules.move_history.is_empty()
-		undo_button.tooltip_text = "Undo Last Move"
+		undo_button.disabled = vector_board.rules.move_history.is_empty() and not has_pending_promo
+		undo_button.tooltip_text = "Cancel Promotion" if has_pending_promo else "Undo Last Move"
 		undo_button.queue_redraw()
 
 	if flip_button != null:
@@ -1042,8 +1100,16 @@ func _on_promotion_requested(_pending_move: GameRules.VectorMove, _team: PieceDa
 	if not side_panel.visible:
 		side_panel.visible = true
 		_update_toggle_panel_button()
+		_update_gpu_warning_banner_layout()
 	promotion_box.visible = true
 	status_label.text = "Select Promotion Piece"
+	_update_control_buttons()
+
+
+func _on_promotion_canceled() -> void:
+	if promotion_box != null:
+		promotion_box.visible = false
+	_refresh_hud()
 
 
 func _is_ai_turn() -> bool:
@@ -1308,13 +1374,6 @@ func _update_new_game_modal_state(val: float) -> void:
 	cancel_new_game_button.queue_redraw()
 	confirm_new_game_button.queue_redraw()
 
-	if unlocked:
-		slider_hint_label.text = "Unlocked - Press + to Start Match"
-		slider_hint_label.modulate = Color(0.25, 1.0, 0.65, 1.0)
-	else:
-		slider_hint_label.text = "Slide all the way right to unlock >>"
-		slider_hint_label.modulate = Color(0.65, 0.78, 0.95, 0.9)
-
 
 func _on_confirm_new_game_pressed() -> void:
 	if confirm_slider.value < SLIDER_UNLOCK_THRESHOLD:
@@ -1340,6 +1399,13 @@ func _on_confirm_new_game_pressed() -> void:
 
 
 func _on_undo_pressed() -> void:
+	if vector_board != null and vector_board.pending_promotion_move != null:
+		vector_board.cancel_pending_promotion()
+		if promotion_box != null and promotion_box.visible:
+			promotion_box.visible = false
+			_refresh_hud()
+		return
+
 	promotion_box.visible = false
 	# Cancel any pending AI thinking session
 	_ai_session_id += 1
@@ -1388,3 +1454,8 @@ func _on_promote_bishop_pressed() -> void:
 
 func _on_promote_knight_pressed() -> void:
 	vector_board.complete_promotion(PieceData.Type.KNIGHT)
+
+
+func _on_promote_cancel_pressed() -> void:
+	if vector_board != null:
+		vector_board.cancel_pending_promotion()
