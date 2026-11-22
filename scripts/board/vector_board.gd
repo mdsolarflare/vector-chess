@@ -464,14 +464,18 @@ func _handle_cell_interaction(cell: Vector2i) -> void:
 
 
 func _commit_move(move: GameRules.VectorMove) -> void:
+	if move == null:
+		return
+	var burst_color := COLOR_CYAN
 	if move.is_capture:
 		var captured_piece := rules.get_piece_by_id(move.captured_piece_id)
 		if captured_piece == null:
 			captured_piece = rules.get_piece_at(move.captured_pos)
-		var burst_color := COLOR_MAGENTA if (captured_piece != null and captured_piece.team == PieceData.Team.MAGENTA) else COLOR_CYAN
-		_spawn_polygon_burst(move.captured_pos, burst_color)
+		burst_color = COLOR_MAGENTA if (captured_piece != null and captured_piece.team == PieceData.Team.MAGENTA) else COLOR_CYAN
 
 	if rules.execute_move(move):
+		if move.is_capture:
+			_spawn_polygon_burst(move.captured_pos, burst_color)
 		var notation: String = str(rules.move_history[-1].get("notation", ""))
 		selected_piece = null
 		legal_moves = []
