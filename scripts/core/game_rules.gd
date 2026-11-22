@@ -17,7 +17,6 @@ class VectorMove extends RefCounted:
 	var en_passant_target: Vector2i = Vector2i(99, 99)
 	var is_promotion: bool = false
 	var promotion_type: PieceData.Type = PieceData.Type.QUEEN
-	var ray_steps: Array[Vector2i] = []
 
 	func _init(p_piece_id: int, p_from: Vector2i, p_to: Vector2i) -> void:
 		piece_id = p_piece_id
@@ -36,8 +35,6 @@ class VectorMove extends RefCounted:
 		copy.en_passant_target = en_passant_target
 		copy.is_promotion = is_promotion
 		copy.promotion_type = promotion_type
-		if not ray_steps.is_empty():
-			copy.ray_steps = ray_steps.duplicate()
 		return copy
 
 	## Returns the 2D Euclidean displacement vector in screen-normalized hex units (Right = +X, Up = +Y).
@@ -116,8 +113,6 @@ var current_turn: PieceData.Team = PieceData.Team.CYAN
 var en_passant_target: Vector2i = INVALID_HEX
 var en_passant_pawn_id: int = -1
 var move_history: Array[Dictionary] = []
-var captured_by_cyan: Array[PieceData.Type] = []
-var captured_by_magenta: Array[PieceData.Type] = []
 var is_game_over: bool = false
 var status_text: String = "Cyan's Turn"
 var last_move: VectorMove = null
@@ -134,6 +129,9 @@ var _id_map: Array[PieceData] = []
 var _cyan_king: PieceData = null
 var _magenta_king: PieceData = null
 var _indexed_piece_count: int = 0
+var _indexed_on_board_count: int = 0
+## Active depth of nested push_search_move() calls; skips redundant full-array verification during AI search
+var _search_depth: int = 0
 
 
 func _init(skip_reset: bool = false) -> void:
@@ -158,10 +156,36 @@ func _ensure_spatial_index() -> void:
 	if _indexed_piece_count != pieces.size():
 		_rebuild_spatial_index()
 		return
-	if not pieces.is_empty():
-		var first := pieces[0]
-		if first.id <= 0 or first.id >= _id_map.size() or _id_map[first.id] != first:
+	if _search_depth > 0:
+		return
+	var expected_cyan_king: PieceData = null
+	var expected_magenta_king: PieceData = null
+	var on_board_count: int = 0
+	for p in pieces:
+		if p == null or p.id <= 0 or p.id >= _id_map.size() or _id_map[p.id] != p:
 			_rebuild_spatial_index()
+			return
+		var pos := p.grid_pos
+		if (
+			absi(pos.x) <= BOARD_RADIUS
+			and absi(pos.y) <= BOARD_RADIUS
+			and absi(pos.x + pos.y) <= BOARD_RADIUS
+		):
+			on_board_count += 1
+			if _grid[(pos.x + BOARD_RADIUS) * GRID_SPAN + (pos.y + BOARD_RADIUS)] != p:
+				_rebuild_spatial_index()
+				return
+		if p.type == PieceData.Type.KING:
+			if p.team == PieceData.Team.CYAN:
+				expected_cyan_king = p
+			else:
+				expected_magenta_king = p
+	if (
+		on_board_count != _indexed_on_board_count
+		or expected_cyan_king != _cyan_king
+		or expected_magenta_king != _magenta_king
+	):
+		_rebuild_spatial_index()
 
 
 func _rebuild_spatial_index() -> void:
@@ -169,34 +193,90 @@ func _rebuild_spatial_index() -> void:
 	_id_map.fill(null)
 	_cyan_king = null
 	_magenta_king = null
+	var has_null := false
+	var on_board_count: int = 0
 	for p in pieces:
+		if p == null:
+			has_null = true
+			continue
 		if is_inside_board(p.grid_pos):
 			_grid[(p.grid_pos.x + BOARD_RADIUS) * GRID_SPAN + (p.grid_pos.y + BOARD_RADIUS)] = p
+			on_board_count += 1
 		if p.id >= _id_map.size():
 			_id_map.resize(p.id + 32)
-		if p.id >= 0:
+		if p.id > 0:
 			_id_map[p.id] = p
 		if p.type == PieceData.Type.KING:
 			if p.team == PieceData.Team.CYAN:
 				_cyan_king = p
 			else:
 				_magenta_king = p
+	if has_null:
+		var compacted: Array[PieceData] = []
+		for p in pieces:
+			if p != null:
+				compacted.append(p)
+		pieces = compacted
 	_indexed_piece_count = pieces.size()
+	_indexed_on_board_count = on_board_count
 
 
-func reset_game() -> void:
+## Removes all pieces from the board and resets all spatial index structures and en-passant state.
+func clear_pieces() -> void:
 	pieces.clear()
 	_grid.fill(null)
 	_id_map.fill(null)
 	_cyan_king = null
 	_magenta_king = null
 	_indexed_piece_count = 0
-	move_history.clear()
-	captured_by_cyan.clear()
-	captured_by_magenta.clear()
-	current_turn = PieceData.Team.CYAN
+	_indexed_on_board_count = 0
+	_search_depth = 0
 	en_passant_target = INVALID_HEX
 	en_passant_pawn_id = -1
+
+
+## Removes `piece` from the board and keeps the spatial grid, ID map, and King references synchronized.
+func remove_piece(piece: PieceData) -> bool:
+	if piece == null:
+		return false
+	_ensure_spatial_index()
+	return _remove_piece_raw(piece)
+
+
+func _remove_piece_raw(piece: PieceData) -> bool:
+	var idx := pieces.find(piece)
+	if idx == -1:
+		return false
+	pieces.remove_at(idx)
+	if is_inside_board(piece.grid_pos):
+		var grid_idx := (piece.grid_pos.x + BOARD_RADIUS) * GRID_SPAN + (piece.grid_pos.y + BOARD_RADIUS)
+		if _grid[grid_idx] == piece:
+			_grid[grid_idx] = null
+		_indexed_on_board_count -= 1
+	if piece.id > 0 and piece.id < _id_map.size() and _id_map[piece.id] == piece:
+		_id_map[piece.id] = null
+	if piece == _cyan_king:
+		_cyan_king = _find_king(PieceData.Team.CYAN)
+	elif piece == _magenta_king:
+		_magenta_king = _find_king(PieceData.Team.MAGENTA)
+	if piece.id == en_passant_pawn_id:
+		en_passant_target = INVALID_HEX
+		en_passant_pawn_id = -1
+	_indexed_piece_count = pieces.size()
+	return true
+
+
+func _find_king(team: PieceData.Team) -> PieceData:
+	for p in pieces:
+		if p != null and p.type == PieceData.Type.KING and p.team == team:
+			return p
+	return null
+
+
+func reset_game() -> void:
+	clear_pieces()
+	move_history.clear()
+	current_turn = PieceData.Team.CYAN
 	is_game_over = false
 	last_move = null
 	_next_id = 1
@@ -239,6 +319,7 @@ func _spawn_piece(team: PieceData.Team, type: PieceData.Type, pos: Vector2i) -> 
 	pieces.append(p)
 	if is_inside_board(pos):
 		_grid[(pos.x + BOARD_RADIUS) * GRID_SPAN + (pos.y + BOARD_RADIUS)] = p
+		_indexed_on_board_count += 1
 	if p.id >= _id_map.size():
 		_id_map.resize(p.id + 32)
 	_id_map[p.id] = p
@@ -258,8 +339,6 @@ func clone_state() -> GameRules:
 	copy.current_turn = current_turn
 	copy.en_passant_target = en_passant_target
 	copy.en_passant_pawn_id = en_passant_pawn_id
-	copy.captured_by_cyan = captured_by_cyan.duplicate()
-	copy.captured_by_magenta = captured_by_magenta.duplicate()
 	copy.is_game_over = is_game_over
 	copy.status_text = status_text
 	copy.last_move = last_move.duplicate_move() if last_move != null else null
@@ -269,18 +348,32 @@ func clone_state() -> GameRules:
 
 
 ## Returns all legal moves for all pieces belonging to `team`.
-func get_all_legal_moves(team: PieceData.Team, _build_rays: bool = true) -> Array[VectorMove]:
+func get_all_legal_moves(team: PieceData.Team) -> Array[VectorMove]:
 	var all_moves: Array[VectorMove] = []
 	if is_game_over:
 		return all_moves
 	_ensure_spatial_index()
 	for p in pieces:
-		if p.team == team:
+		if p.team == team and is_inside_board(p.grid_pos):
 			var pseudo_moves := _get_pseudo_legal_moves(p)
 			for mv in pseudo_moves:
 				if not _move_leaves_king_in_check(p, mv):
 					all_moves.append(mv)
 	return all_moves
+
+
+## Returns true as soon as any legal move exists for `team`, early-exiting on the first found move.
+func has_any_legal_move(team: PieceData.Team) -> bool:
+	if is_game_over:
+		return false
+	_ensure_spatial_index()
+	for p in pieces:
+		if p.team == team and is_inside_board(p.grid_pos):
+			var pseudo_moves := _get_pseudo_legal_moves(p)
+			for mv in pseudo_moves:
+				if not _move_leaves_king_in_check(p, mv):
+					return true
+	return false
 
 
 ## Returns only legal tactical moves (captures and promotions) for `team`,
@@ -291,7 +384,7 @@ func get_all_tactical_moves(team: PieceData.Team) -> Array[VectorMove]:
 		return tactical_moves
 	_ensure_spatial_index()
 	for p in pieces:
-		if p.team == team:
+		if p.team == team and is_inside_board(p.grid_pos):
 			var pseudo := _get_pseudo_tactical_moves(p)
 			for mv in pseudo:
 				if not _move_leaves_king_in_check(p, mv):
@@ -302,14 +395,14 @@ func get_all_tactical_moves(team: PieceData.Team) -> Array[VectorMove]:
 ## Fast in-place move execution for AI search tree traversal (no string formatting or full array cloning).
 func push_search_move(move: VectorMove) -> Dictionary:
 	_ensure_spatial_index()
-	var piece := get_piece_by_id(move.piece_id)
+	var piece := _get_piece_by_id_raw(move.piece_id)
 	var target: PieceData = null
 	if move.is_en_passant:
-		target = get_piece_by_id(move.captured_piece_id)
+		target = _get_piece_by_id_raw(move.captured_piece_id)
 		if target == null:
-			target = get_piece_at(move.captured_pos)
+			target = _get_piece_at_raw(move.captured_pos)
 	elif move.is_capture:
-		target = get_piece_at(move.to)
+		target = _get_piece_at_raw(move.to)
 
 	var old_pos := piece.grid_pos
 	var undo_record := {
@@ -325,11 +418,17 @@ func push_search_move(move: VectorMove) -> Dictionary:
 	}
 
 	if target != null:
-		var cap_idx := (target.grid_pos.x + BOARD_RADIUS) * GRID_SPAN + (target.grid_pos.y + BOARD_RADIUS)
-		if _grid[cap_idx] == target:
-			_grid[cap_idx] = null
+		if is_inside_board(target.grid_pos):
+			var cap_idx := (target.grid_pos.x + BOARD_RADIUS) * GRID_SPAN + (target.grid_pos.y + BOARD_RADIUS)
+			if _grid[cap_idx] == target:
+				_grid[cap_idx] = null
+			_indexed_on_board_count -= 1
 		if target.id > 0 and target.id < _id_map.size():
 			_id_map[target.id] = null
+		if target == _cyan_king:
+			_cyan_king = null
+		elif target == _magenta_king:
+			_magenta_king = null
 		pieces.erase(target)
 		_indexed_piece_count = pieces.size()
 
@@ -354,6 +453,7 @@ func push_search_move(move: VectorMove) -> Dictionary:
 		en_passant_pawn_id = -1
 
 	current_turn = PieceData.Team.MAGENTA if current_turn == PieceData.Team.CYAN else PieceData.Team.CYAN
+	_search_depth += 1
 	return undo_record
 
 
@@ -379,14 +479,22 @@ func pop_search_move(undo_record: Dictionary) -> void:
 	if captured != null:
 		pieces.append(captured)
 		_indexed_piece_count = pieces.size()
-		var cap_idx := (captured.grid_pos.x + BOARD_RADIUS) * GRID_SPAN + (captured.grid_pos.y + BOARD_RADIUS)
-		_grid[cap_idx] = captured
+		if is_inside_board(captured.grid_pos):
+			var cap_idx := (captured.grid_pos.x + BOARD_RADIUS) * GRID_SPAN + (captured.grid_pos.y + BOARD_RADIUS)
+			_grid[cap_idx] = captured
+			_indexed_on_board_count += 1
 		if captured.id > 0 and captured.id < _id_map.size():
 			_id_map[captured.id] = captured
+		if captured.type == PieceData.Type.KING:
+			if captured.team == PieceData.Team.CYAN:
+				_cyan_king = captured
+			else:
+				_magenta_king = captured
 
 	current_turn = undo_record["old_turn"]
 	en_passant_target = undo_record["old_ep_target"]
 	en_passant_pawn_id = undo_record["old_ep_pawn_id"]
+	_search_depth = maxi(0, _search_depth - 1)
 
 
 ## Returns all 91 valid axial hex coordinates on the board.
@@ -452,6 +560,18 @@ static func is_promotion_cell(team: PieceData.Team, pos: Vector2i) -> bool:
 		return not is_inside_board(pos + Vector2i(0, 1))
 
 
+func _get_piece_at_raw(pos: Vector2i) -> PieceData:
+	if not is_inside_board(pos):
+		return null
+	return _grid[(pos.x + BOARD_RADIUS) * GRID_SPAN + (pos.y + BOARD_RADIUS)]
+
+
+func _get_piece_by_id_raw(id: int) -> PieceData:
+	if id <= 0 or id >= _id_map.size():
+		return null
+	return _id_map[id]
+
+
 func get_piece_at(pos: Vector2i) -> PieceData:
 	if not is_inside_board(pos):
 		return null
@@ -461,9 +581,7 @@ func get_piece_at(pos: Vector2i) -> PieceData:
 
 func get_piece_by_id(id: int) -> PieceData:
 	_ensure_spatial_index()
-	if id <= 0 or id >= _id_map.size():
-		return null
-	return _id_map[id]
+	return _get_piece_by_id_raw(id)
 
 
 ## Generates all legal moves for a piece, filtering out moves that leave own King in check.
@@ -471,6 +589,8 @@ func get_legal_moves_for_piece(piece: PieceData) -> Array[VectorMove]:
 	if piece == null or is_game_over:
 		return []
 	_ensure_spatial_index()
+	if not is_inside_board(piece.grid_pos) or _get_piece_by_id_raw(piece.id) != piece:
+		return []
 	var pseudo_moves := _get_pseudo_legal_moves(piece)
 	var legal_moves: Array[VectorMove] = []
 	for mv in pseudo_moves:
@@ -481,9 +601,56 @@ func get_legal_moves_for_piece(piece: PieceData) -> Array[VectorMove]:
 
 ## Executes a validated move and advances the turn.
 func execute_move(move: VectorMove) -> bool:
+	if (
+		move == null
+		or is_game_over
+		or not is_inside_board(move.from)
+		or not is_inside_board(move.to)
+		or move.from == move.to
+	):
+		return false
 	_ensure_spatial_index()
-	var piece := get_piece_by_id(move.piece_id)
-	if piece == null:
+	var piece := _get_piece_by_id_raw(move.piece_id)
+	if piece == null or piece.team != current_turn or piece.grid_pos != move.from:
+		return false
+
+	if move.is_promotion:
+		if (
+			piece.type != PieceData.Type.PAWN
+			or not is_promotion_cell(piece.team, move.to)
+			or move.promotion_type == PieceData.Type.PAWN
+			or move.promotion_type == PieceData.Type.KING
+		):
+			return false
+
+	var dest_occ := _grid[(move.to.x + BOARD_RADIUS) * GRID_SPAN + (move.to.y + BOARD_RADIUS)]
+	var target: PieceData = null
+	if move.is_en_passant:
+		if (
+			dest_occ != null
+			or piece.type != PieceData.Type.PAWN
+			or move.to != en_passant_target
+			or en_passant_pawn_id == -1
+		):
+			return false
+		target = _get_piece_by_id_raw(en_passant_pawn_id)
+		if (
+			target == null
+			or target.team == piece.team
+			or target.type != PieceData.Type.PAWN
+			or (move.captured_piece_id != -1 and target.id != move.captured_piece_id)
+			or target.grid_pos != move.captured_pos
+		):
+			return false
+	elif move.is_capture:
+		target = dest_occ
+		if (
+			target == null
+			or target.team == piece.team
+			or (move.captured_piece_id != -1 and target.id != move.captured_piece_id)
+		):
+			return false
+	elif dest_occ != null:
 		return false
 
 	var snapshot := {
@@ -491,34 +658,14 @@ func execute_move(move: VectorMove) -> bool:
 		"current_turn": current_turn,
 		"en_passant_target": en_passant_target,
 		"en_passant_pawn_id": en_passant_pawn_id,
-		"captured_by_cyan": captured_by_cyan.duplicate(),
-		"captured_by_magenta": captured_by_magenta.duplicate(),
 		"is_game_over": is_game_over,
 		"status_text": status_text,
 		"last_move": last_move,
 		"notation": "",
 	}
 
-	var target: PieceData = null
-	if move.is_en_passant:
-		target = get_piece_by_id(move.captured_piece_id)
-		if target == null:
-			target = get_piece_at(move.captured_pos)
-	elif move.is_capture:
-		target = get_piece_at(move.to)
-
 	if target != null:
-		if piece.team == PieceData.Team.CYAN:
-			captured_by_cyan.append(target.type)
-		else:
-			captured_by_magenta.append(target.type)
-		var cap_idx := (target.grid_pos.x + BOARD_RADIUS) * GRID_SPAN + (target.grid_pos.y + BOARD_RADIUS)
-		if _grid[cap_idx] == target:
-			_grid[cap_idx] = null
-		if target.id > 0 and target.id < _id_map.size():
-			_id_map[target.id] = null
-		pieces.erase(target)
-		_indexed_piece_count = pieces.size()
+		_remove_piece_raw(target)
 
 	var from_idx := (piece.grid_pos.x + BOARD_RADIUS) * GRID_SPAN + (piece.grid_pos.y + BOARD_RADIUS)
 	if _grid[from_idx] == piece:
@@ -555,13 +702,13 @@ func undo_last_move() -> bool:
 	var snapshot: Dictionary = move_history.pop_back()
 	pieces = snapshot["pieces"]
 	for p in pieces:
-		p.visual_pos = Vector2(p.grid_pos)
+		if p != null:
+			p.visual_pos = Vector2(p.grid_pos)
+	_search_depth = 0
 	_rebuild_spatial_index()
 	current_turn = snapshot["current_turn"]
 	en_passant_target = snapshot["en_passant_target"]
 	en_passant_pawn_id = snapshot["en_passant_pawn_id"]
-	captured_by_cyan = snapshot["captured_by_cyan"]
-	captured_by_magenta = snapshot["captured_by_magenta"]
 	is_game_over = snapshot["is_game_over"]
 	status_text = snapshot["status_text"]
 	last_move = snapshot["last_move"]
@@ -570,93 +717,35 @@ func undo_last_move() -> bool:
 
 ## Allocation-free reverse-attack lookup from `target_pos` for pieces belonging to `by_team`.
 func is_cell_attacked(target_pos: Vector2i, by_team: PieceData.Team) -> bool:
+	if not is_inside_board(target_pos):
+		return false
 	_ensure_spatial_index()
 	return _is_cell_attacked_raw(target_pos, by_team)
 
 
 func _is_cell_attacked_raw(target_pos: Vector2i, by_team: PieceData.Team) -> bool:
-	# 1. Orthogonal rays: Rook, Queen, or adjacent King
-	for d in ORTHO_DIRS:
-		var step_pos := target_pos + d
-		var is_first_step := true
-		while (
-			absi(step_pos.x) <= BOARD_RADIUS
-			and absi(step_pos.y) <= BOARD_RADIUS
-			and absi(step_pos.x + step_pos.y) <= BOARD_RADIUS
-		):
-			var occ := _grid[(step_pos.x + BOARD_RADIUS) * GRID_SPAN + (step_pos.y + BOARD_RADIUS)]
-			if occ != null:
-				if occ.team == by_team:
-					var t := occ.type
-					if (
-						t == PieceData.Type.ROOK
-						or t == PieceData.Type.QUEEN
-						or (is_first_step and t == PieceData.Type.KING)
-					):
-						return true
-				break
-			step_pos += d
-			is_first_step = false
-
-	# 2. Diagonal rays: Bishop, Queen, or adjacent King
-	for d in DIAG_DIRS:
-		var step_pos := target_pos + d
-		var is_first_step := true
-		while (
-			absi(step_pos.x) <= BOARD_RADIUS
-			and absi(step_pos.y) <= BOARD_RADIUS
-			and absi(step_pos.x + step_pos.y) <= BOARD_RADIUS
-		):
-			var occ := _grid[(step_pos.x + BOARD_RADIUS) * GRID_SPAN + (step_pos.y + BOARD_RADIUS)]
-			if occ != null:
-				if occ.team == by_team:
-					var t := occ.type
-					if (
-						t == PieceData.Type.BISHOP
-						or t == PieceData.Type.QUEEN
-						or (is_first_step and t == PieceData.Type.KING)
-					):
-						return true
-				break
-			step_pos += d
-			is_first_step = false
-
-	# 3. Knight jumps (12 offsets)
-	for j in KNIGHT_DIRS:
-		var k_pos := target_pos + j
-		if (
-			absi(k_pos.x) <= BOARD_RADIUS
-			and absi(k_pos.y) <= BOARD_RADIUS
-			and absi(k_pos.x + k_pos.y) <= BOARD_RADIUS
-		):
-			var occ := _grid[(k_pos.x + BOARD_RADIUS) * GRID_SPAN + (k_pos.y + BOARD_RADIUS)]
-			if occ != null and occ.team == by_team and occ.type == PieceData.Type.KNIGHT:
-				return true
-
-	# 4. Pawn captures (reverse of by_team's pawn capture vectors)
-	var cap_dirs: Array[Vector2i] = (
-		CYAN_PAWN_CAP_DIRS if by_team == PieceData.Team.CYAN else MAGENTA_PAWN_CAP_DIRS
-	)
-	for cd in cap_dirs:
-		var p_pos := target_pos - cd
-		if (
-			absi(p_pos.x) <= BOARD_RADIUS
-			and absi(p_pos.y) <= BOARD_RADIUS
-			and absi(p_pos.x + p_pos.y) <= BOARD_RADIUS
-		):
-			var occ := _grid[(p_pos.x + BOARD_RADIUS) * GRID_SPAN + (p_pos.y + BOARD_RADIUS)]
-			if occ != null and occ.team == by_team and occ.type == PieceData.Type.PAWN:
-				return true
-
-	return false
+	return _scan_cell_attackers(target_pos, by_team, null)
 
 
 ## Returns all pieces belonging to `by_team` that currently attack `target_pos`.
 func get_cell_attackers(target_pos: Vector2i, by_team: PieceData.Team) -> Array[PieceData]:
-	_ensure_spatial_index()
 	var attackers: Array[PieceData] = []
 	if not is_inside_board(target_pos):
 		return attackers
+	_ensure_spatial_index()
+	_scan_cell_attackers(target_pos, by_team, attackers)
+	return attackers
+
+
+## Shared reverse-attack scanner for `_is_cell_attacked_raw()` and `get_cell_attackers()`.
+## When `out_attackers` is null, returns true on the first attacker found with zero allocations.
+## When `out_attackers` is an Array, appends every attacker and returns whether any was found.
+func _scan_cell_attackers(
+	target_pos: Vector2i,
+	by_team: PieceData.Team,
+	out_attackers: Variant = null
+) -> bool:
+	var found := false
 
 	# 1. Orthogonal rays: Rook, Queen, or adjacent King
 	for d in ORTHO_DIRS:
@@ -676,7 +765,10 @@ func get_cell_attackers(target_pos: Vector2i, by_team: PieceData.Team) -> Array[
 						or t == PieceData.Type.QUEEN
 						or (is_first_step and t == PieceData.Type.KING)
 					):
-						attackers.append(occ)
+						if out_attackers == null:
+							return true
+						(out_attackers as Array).append(occ)
+						found = true
 				break
 			step_pos += d
 			is_first_step = false
@@ -699,7 +791,10 @@ func get_cell_attackers(target_pos: Vector2i, by_team: PieceData.Team) -> Array[
 						or t == PieceData.Type.QUEEN
 						or (is_first_step and t == PieceData.Type.KING)
 					):
-						attackers.append(occ)
+						if out_attackers == null:
+							return true
+						(out_attackers as Array).append(occ)
+						found = true
 				break
 			step_pos += d
 			is_first_step = false
@@ -714,7 +809,10 @@ func get_cell_attackers(target_pos: Vector2i, by_team: PieceData.Team) -> Array[
 		):
 			var occ := _grid[(k_pos.x + BOARD_RADIUS) * GRID_SPAN + (k_pos.y + BOARD_RADIUS)]
 			if occ != null and occ.team == by_team and occ.type == PieceData.Type.KNIGHT:
-				attackers.append(occ)
+				if out_attackers == null:
+					return true
+				(out_attackers as Array).append(occ)
+				found = true
 
 	# 4. Pawn captures (reverse of by_team's pawn capture vectors)
 	var cap_dirs: Array[Vector2i] = (
@@ -729,28 +827,33 @@ func get_cell_attackers(target_pos: Vector2i, by_team: PieceData.Team) -> Array[
 		):
 			var occ := _grid[(p_pos.x + BOARD_RADIUS) * GRID_SPAN + (p_pos.y + BOARD_RADIUS)]
 			if occ != null and occ.team == by_team and occ.type == PieceData.Type.PAWN:
-				attackers.append(occ)
+				if out_attackers == null:
+					return true
+				(out_attackers as Array).append(occ)
+				found = true
 
-	return attackers
+	return found
 
 
 func is_king_in_check(team: PieceData.Team) -> bool:
 	_ensure_spatial_index()
 	var king := _cyan_king if team == PieceData.Team.CYAN else _magenta_king
-	if king == null:
+	if king == null or not is_inside_board(king.grid_pos):
 		return true
 	var enemy_team := PieceData.Team.MAGENTA if team == PieceData.Team.CYAN else PieceData.Team.CYAN
-	return _is_cell_attacked_raw(king.grid_pos, enemy_team)
+	return _scan_cell_attackers(king.grid_pos, enemy_team, null)
 
 
 ## Returns all enemy pieces currently placing `team`'s King in check.
 func get_checking_pieces(team: PieceData.Team) -> Array[PieceData]:
 	_ensure_spatial_index()
 	var king := _cyan_king if team == PieceData.Team.CYAN else _magenta_king
-	if king == null:
-		return []
+	var attackers: Array[PieceData] = []
+	if king == null or not is_inside_board(king.grid_pos):
+		return attackers
 	var enemy_team := PieceData.Team.MAGENTA if team == PieceData.Team.CYAN else PieceData.Team.CYAN
-	return get_cell_attackers(king.grid_pos, enemy_team)
+	_scan_cell_attackers(king.grid_pos, enemy_team, attackers)
+	return attackers
 
 
 func format_move_notation(piece: PieceData, move: VectorMove) -> String:
@@ -766,10 +869,35 @@ func format_move_notation(piece: PieceData, move: VectorMove) -> String:
 	return "%s %s%s%s%s  d(%+d,%+d)" % [code, from_alg, sep, to_alg, suffix, move.delta.x, move.delta.y]
 
 
-func _get_pseudo_legal_moves(
-	piece: PieceData,
-	include_en_passant: bool = true
-) -> Array[VectorMove]:
+func _append_pawn_captures(piece: PieceData, moves: Array[VectorMove]) -> void:
+	# Glinski pawn captures: 60-degree forward-sideways orthogonal cells
+	var cap_dirs: Array[Vector2i] = (
+		CYAN_PAWN_CAP_DIRS if piece.team == PieceData.Team.CYAN else MAGENTA_PAWN_CAP_DIRS
+	)
+	for cd in cap_dirs:
+		var cap_pos := piece.grid_pos + cd
+		if not is_inside_board(cap_pos):
+			continue
+		var target := _grid[(cap_pos.x + BOARD_RADIUS) * GRID_SPAN + (cap_pos.y + BOARD_RADIUS)]
+		if target != null and target.team != piece.team:
+			var cmv := VectorMove.new(piece.id, piece.grid_pos, cap_pos)
+			cmv.is_capture = true
+			cmv.captured_piece_id = target.id
+			cmv.captured_pos = cap_pos
+			cmv.is_promotion = is_promotion_cell(piece.team, cap_pos)
+			moves.append(cmv)
+		elif target == null and cap_pos == en_passant_target and en_passant_pawn_id != -1:
+			var ep_pawn := _get_piece_by_id_raw(en_passant_pawn_id)
+			if ep_pawn != null and ep_pawn.team != piece.team and is_inside_board(ep_pawn.grid_pos):
+				var epmv := VectorMove.new(piece.id, piece.grid_pos, cap_pos)
+				epmv.is_capture = true
+				epmv.is_en_passant = true
+				epmv.captured_piece_id = ep_pawn.id
+				epmv.captured_pos = ep_pawn.grid_pos
+				moves.append(epmv)
+
+
+func _get_pseudo_legal_moves(piece: PieceData) -> Array[VectorMove]:
 	var moves: Array[VectorMove] = []
 	match piece.type:
 		PieceData.Type.PAWN:
@@ -792,31 +920,7 @@ func _get_pseudo_legal_moves(
 					mv2.en_passant_target = one_step
 					moves.append(mv2)
 
-			# Glinski pawn captures: 60-degree forward-sideways orthogonal cells
-			var cap_dirs: Array[Vector2i] = (
-				CYAN_PAWN_CAP_DIRS if piece.team == PieceData.Team.CYAN else MAGENTA_PAWN_CAP_DIRS
-			)
-			for cd in cap_dirs:
-				var cap_pos := piece.grid_pos + cd
-				if not is_inside_board(cap_pos):
-					continue
-				var target := _grid[(cap_pos.x + BOARD_RADIUS) * GRID_SPAN + (cap_pos.y + BOARD_RADIUS)]
-				if target != null and target.team != piece.team:
-					var cmv := VectorMove.new(piece.id, piece.grid_pos, cap_pos)
-					cmv.is_capture = true
-					cmv.captured_piece_id = target.id
-					cmv.captured_pos = cap_pos
-					cmv.is_promotion = is_promotion_cell(piece.team, cap_pos)
-					moves.append(cmv)
-				elif include_en_passant and cap_pos == en_passant_target and en_passant_pawn_id != -1:
-					var ep_pawn := get_piece_by_id(en_passant_pawn_id)
-					if ep_pawn != null and ep_pawn.team != piece.team:
-						var epmv := VectorMove.new(piece.id, piece.grid_pos, cap_pos)
-						epmv.is_capture = true
-						epmv.is_en_passant = true
-						epmv.captured_piece_id = ep_pawn.id
-						epmv.captured_pos = ep_pawn.grid_pos
-						moves.append(epmv)
+			_append_pawn_captures(piece, moves)
 
 		PieceData.Type.KNIGHT:
 			for j in KNIGHT_DIRS:
@@ -857,30 +961,7 @@ func _get_pseudo_tactical_moves(piece: PieceData) -> Array[VectorMove]:
 				mv.is_promotion = true
 				moves.append(mv)
 
-			var cap_dirs: Array[Vector2i] = (
-				CYAN_PAWN_CAP_DIRS if piece.team == PieceData.Team.CYAN else MAGENTA_PAWN_CAP_DIRS
-			)
-			for cd in cap_dirs:
-				var cap_pos := piece.grid_pos + cd
-				if not is_inside_board(cap_pos):
-					continue
-				var target := _grid[(cap_pos.x + BOARD_RADIUS) * GRID_SPAN + (cap_pos.y + BOARD_RADIUS)]
-				if target != null and target.team != piece.team:
-					var cmv := VectorMove.new(piece.id, piece.grid_pos, cap_pos)
-					cmv.is_capture = true
-					cmv.captured_piece_id = target.id
-					cmv.captured_pos = cap_pos
-					cmv.is_promotion = is_promotion_cell(piece.team, cap_pos)
-					moves.append(cmv)
-				elif cap_pos == en_passant_target and en_passant_pawn_id != -1:
-					var ep_pawn := get_piece_by_id(en_passant_pawn_id)
-					if ep_pawn != null and ep_pawn.team != piece.team:
-						var epmv := VectorMove.new(piece.id, piece.grid_pos, cap_pos)
-						epmv.is_capture = true
-						epmv.is_en_passant = true
-						epmv.captured_piece_id = ep_pawn.id
-						epmv.captured_pos = ep_pawn.grid_pos
-						moves.append(epmv)
+			_append_pawn_captures(piece, moves)
 
 		PieceData.Type.KNIGHT:
 			for j in KNIGHT_DIRS:
@@ -973,7 +1054,7 @@ func _move_leaves_king_in_check(piece: PieceData, move: VectorMove) -> bool:
 	var to_idx := (move.to.x + BOARD_RADIUS) * GRID_SPAN + (move.to.y + BOARD_RADIUS)
 	var enemy_team := PieceData.Team.MAGENTA if piece.team == PieceData.Team.CYAN else PieceData.Team.CYAN
 	var king := _cyan_king if piece.team == PieceData.Team.CYAN else _magenta_king
-	if king == null:
+	if king == null or not is_inside_board(king.grid_pos):
 		return true
 
 	if move.is_en_passant:
@@ -984,7 +1065,7 @@ func _move_leaves_king_in_check(piece: PieceData, move: VectorMove) -> bool:
 		_grid[to_idx] = piece
 		piece.grid_pos = move.to
 
-		var in_check_ep := _is_cell_attacked_raw(king.grid_pos, enemy_team)
+		var in_check_ep := _scan_cell_attackers(king.grid_pos, enemy_team, null)
 
 		piece.grid_pos = old_pos
 		_grid[to_idx] = null
@@ -997,7 +1078,7 @@ func _move_leaves_king_in_check(piece: PieceData, move: VectorMove) -> bool:
 	_grid[to_idx] = piece
 	piece.grid_pos = move.to
 
-	var in_check := _is_cell_attacked_raw(king.grid_pos, enemy_team)
+	var in_check := _scan_cell_attackers(king.grid_pos, enemy_team, null)
 
 	piece.grid_pos = old_pos
 	_grid[to_idx] = captured
@@ -1007,13 +1088,7 @@ func _move_leaves_king_in_check(piece: PieceData, move: VectorMove) -> bool:
 
 func _update_game_status() -> void:
 	var team_name := "Cyan" if current_turn == PieceData.Team.CYAN else "Magenta"
-	var any_legal := false
-	for p in pieces:
-		if p.team == current_turn:
-			if not get_legal_moves_for_piece(p).is_empty():
-				any_legal = true
-				break
-
+	var any_legal := has_any_legal_move(current_turn)
 	var in_check := is_king_in_check(current_turn)
 	if not any_legal:
 		is_game_over = true
@@ -1032,5 +1107,6 @@ func _update_game_status() -> void:
 func _clone_pieces_array() -> Array[PieceData]:
 	var arr: Array[PieceData] = []
 	for p in pieces:
-		arr.append(p.duplicate_piece())
+		if p != null:
+			arr.append(p.duplicate_piece())
 	return arr
