@@ -57,7 +57,10 @@ class VectorMove extends RefCounted:
 const BOARD_RADIUS: int = 5
 const GRID_SPAN: int = BOARD_RADIUS * 2 + 1
 const GRID_SIZE: int = GRID_SPAN * GRID_SPAN
+const PIECE_TYPE_COUNT: int = 6
 const INVALID_HEX := Vector2i(99, 99)
+const FIFTY_MOVE_HALFMOVE_LIMIT: int = 100
+const THREEFOLD_REPETITION_COUNT: int = 3
 
 ## Glinski file labels from q = -5 to q = +5 (omits 'j' by tradition)
 const FILE_NAMES: Array[String] = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "k", "l"]
@@ -108,10 +111,17 @@ const MAGENTA_PAWN_CAP_DIRS: Array[Vector2i] = [
 	Vector2i(1, 0),
 ]
 
+## Shared deterministic 64-bit Zobrist tables for O(1) position hashing (piece placement, turn, legal en passant)
+static var _zobrist_pieces: PackedInt64Array = PackedInt64Array()
+static var _zobrist_turn_magenta: int = 0
+static var _zobrist_en_passant: PackedInt64Array = PackedInt64Array()
+
 var pieces: Array[PieceData] = []
 var current_turn: PieceData.Team = PieceData.Team.CYAN
 var en_passant_target: Vector2i = INVALID_HEX
 var en_passant_pawn_id: int = -1
+## Half-move clock for the 50-move draw rule (resets to 0 on pawn move or capture; draw at >= 100)
+var halfmove_clock: int = 0
 var move_history: Array[Dictionary] = []
 var is_game_over: bool = false
 var status_text: String = "Cyan's Turn"
@@ -130,8 +140,31 @@ var _cyan_king: PieceData = null
 var _magenta_king: PieceData = null
 var _indexed_piece_count: int = 0
 var _indexed_on_board_count: int = 0
+## Incremental 64-bit Zobrist hash of all on-board pieces (turn & legal en passant mixed in by get_position_key())
+var _pieces_hash: int = 0
+## Stack of 64-bit Zobrist position keys along the current game / AI search path
+var _position_history: Array[int] = []
+## Occurrence count per 64-bit Zobrist position key in `_position_history`
+var _position_counts: Dictionary = {}
 ## Active depth of nested push_search_move() calls; skips redundant full-array verification during AI search
 var _search_depth: int = 0
+
+
+static func _static_init() -> void:
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 0x564543544F523332
+	var piece_keys := PackedInt64Array()
+	piece_keys.resize(2 * PIECE_TYPE_COUNT * GRID_SIZE)
+	for i in range(piece_keys.size()):
+		piece_keys[i] = _next_zobrist_key(rng)
+	var turn_key := _next_zobrist_key(rng)
+	var ep_keys := PackedInt64Array()
+	ep_keys.resize(GRID_SIZE)
+	for i in range(GRID_SIZE):
+		ep_keys[i] = _next_zobrist_key(rng)
+	_zobrist_pieces = piece_keys
+	_zobrist_turn_magenta = turn_key
+	_zobrist_en_passant = ep_keys
 
 
 func _init(skip_reset: bool = false) -> void:
@@ -140,6 +173,16 @@ func _init(skip_reset: bool = false) -> void:
 	_init_pawn_start_tables()
 	if not skip_reset:
 		reset_game()
+
+
+static func _next_zobrist_key(rng: RandomNumberGenerator) -> int:
+	var hi: int = rng.randi()
+	var lo: int = rng.randi()
+	return (hi << 32) | (lo & 0xFFFFFFFF)
+
+
+static func _zobrist_piece_key(team: PieceData.Team, type: PieceData.Type, grid_idx: int) -> int:
+	return _zobrist_pieces[(int(team) * PIECE_TYPE_COUNT + int(type)) * GRID_SIZE + grid_idx]
 
 
 func _init_pawn_start_tables() -> void:
@@ -161,6 +204,7 @@ func _ensure_spatial_index() -> void:
 	var expected_cyan_king: PieceData = null
 	var expected_magenta_king: PieceData = null
 	var on_board_count: int = 0
+	var expected_hash: int = 0
 	for p in pieces:
 		if p == null or p.id <= 0 or p.id >= _id_map.size() or _id_map[p.id] != p:
 			_rebuild_spatial_index()
@@ -172,9 +216,11 @@ func _ensure_spatial_index() -> void:
 			and absi(pos.x + pos.y) <= BOARD_RADIUS
 		):
 			on_board_count += 1
-			if _grid[(pos.x + BOARD_RADIUS) * GRID_SPAN + (pos.y + BOARD_RADIUS)] != p:
+			var grid_idx := (pos.x + BOARD_RADIUS) * GRID_SPAN + (pos.y + BOARD_RADIUS)
+			if _grid[grid_idx] != p:
 				_rebuild_spatial_index()
 				return
+			expected_hash ^= _zobrist_piece_key(p.team, p.type, grid_idx)
 		if p.type == PieceData.Type.KING:
 			if p.team == PieceData.Team.CYAN:
 				expected_cyan_king = p
@@ -184,6 +230,7 @@ func _ensure_spatial_index() -> void:
 		on_board_count != _indexed_on_board_count
 		or expected_cyan_king != _cyan_king
 		or expected_magenta_king != _magenta_king
+		or expected_hash != _pieces_hash
 	):
 		_rebuild_spatial_index()
 
@@ -193,6 +240,7 @@ func _rebuild_spatial_index() -> void:
 	_id_map.fill(null)
 	_cyan_king = null
 	_magenta_king = null
+	_pieces_hash = 0
 	var has_null := false
 	var on_board_count: int = 0
 	for p in pieces:
@@ -200,7 +248,9 @@ func _rebuild_spatial_index() -> void:
 			has_null = true
 			continue
 		if is_inside_board(p.grid_pos):
-			_grid[(p.grid_pos.x + BOARD_RADIUS) * GRID_SPAN + (p.grid_pos.y + BOARD_RADIUS)] = p
+			var grid_idx := (p.grid_pos.x + BOARD_RADIUS) * GRID_SPAN + (p.grid_pos.y + BOARD_RADIUS)
+			_grid[grid_idx] = p
+			_pieces_hash ^= _zobrist_piece_key(p.team, p.type, grid_idx)
 			on_board_count += 1
 		if p.id >= _id_map.size():
 			_id_map.resize(p.id + 32)
@@ -221,18 +271,203 @@ func _rebuild_spatial_index() -> void:
 	_indexed_on_board_count = on_board_count
 
 
-## Removes all pieces from the board and resets all spatial index structures and en-passant state.
+func _clear_position_history() -> void:
+	_position_history.clear()
+	_position_counts.clear()
+
+
+func _push_position_key(key: int) -> void:
+	_position_history.append(key)
+	_position_counts[key] = int(_position_counts.get(key, 0)) + 1
+
+
+func _pop_position_key() -> void:
+	if _position_history.is_empty():
+		return
+	var key: int = _position_history.pop_back()
+	var cnt: int = int(_position_counts.get(key, 0)) - 1
+	if cnt <= 0:
+		_position_counts.erase(key)
+	else:
+		_position_counts[key] = cnt
+
+
+## Ensures `_position_history` starts with the current root position when moves begin
+## from a custom board setup (e.g. after `clear_pieces()` or direct `pieces` edits).
+func _sync_initial_position_history() -> void:
+	var key := _get_position_key_raw()
+	if _position_history.is_empty():
+		_push_position_key(key)
+	elif (
+		move_history.is_empty()
+		and _search_depth == 0
+		and _position_history.size() == 1
+		and _position_history[0] != key
+	):
+		_clear_position_history()
+		_push_position_key(key)
+
+
+## Returns `en_passant_target` only if at least one `current_turn` pawn can legally capture
+## en passant onto it (accounting for pins and discovered checks); otherwise returns `INVALID_HEX`.
+func _get_legal_en_passant_target() -> Vector2i:
+	if en_passant_target == INVALID_HEX or en_passant_pawn_id == -1:
+		return INVALID_HEX
+	if not is_inside_board(en_passant_target):
+		return INVALID_HEX
+	var ep_idx := (en_passant_target.x + BOARD_RADIUS) * GRID_SPAN + (en_passant_target.y + BOARD_RADIUS)
+	if _grid[ep_idx] != null:
+		return INVALID_HEX
+	var ep_pawn := _get_piece_by_id_raw(en_passant_pawn_id)
+	if (
+		ep_pawn == null
+		or ep_pawn.team == current_turn
+		or ep_pawn.type != PieceData.Type.PAWN
+		or not is_inside_board(ep_pawn.grid_pos)
+	):
+		return INVALID_HEX
+	var king := _cyan_king if current_turn == PieceData.Team.CYAN else _magenta_king
+	if king == null or not is_inside_board(king.grid_pos):
+		return INVALID_HEX
+
+	var enemy_team := PieceData.Team.MAGENTA if current_turn == PieceData.Team.CYAN else PieceData.Team.CYAN
+	var cap_dirs: Array[Vector2i] = (
+		CYAN_PAWN_CAP_DIRS if current_turn == PieceData.Team.CYAN else MAGENTA_PAWN_CAP_DIRS
+	)
+	var cap_idx := (ep_pawn.grid_pos.x + BOARD_RADIUS) * GRID_SPAN + (ep_pawn.grid_pos.y + BOARD_RADIUS)
+	for cd in cap_dirs:
+		var pawn_pos := en_passant_target - cd
+		if not is_inside_board(pawn_pos):
+			continue
+		var from_idx := (pawn_pos.x + BOARD_RADIUS) * GRID_SPAN + (pawn_pos.y + BOARD_RADIUS)
+		var pawn := _grid[from_idx]
+		if pawn != null and pawn.team == current_turn and pawn.type == PieceData.Type.PAWN:
+			var captured_ep := _grid[cap_idx]
+			_grid[cap_idx] = null
+			_grid[from_idx] = null
+			_grid[ep_idx] = pawn
+			pawn.grid_pos = en_passant_target
+
+			var in_check := _scan_cell_attackers(king.grid_pos, enemy_team, null)
+
+			pawn.grid_pos = pawn_pos
+			_grid[ep_idx] = null
+			_grid[from_idx] = pawn
+			_grid[cap_idx] = captured_ep
+			if not in_check:
+				return en_passant_target
+	return INVALID_HEX
+
+
+func _get_position_key_raw() -> int:
+	var h: int = _pieces_hash
+	if current_turn == PieceData.Team.MAGENTA:
+		h ^= _zobrist_turn_magenta
+	var legal_ep := _get_legal_en_passant_target()
+	if legal_ep != INVALID_HEX:
+		h ^= _zobrist_en_passant[(legal_ep.x + BOARD_RADIUS) * GRID_SPAN + (legal_ep.y + BOARD_RADIUS)]
+	return h
+
+
+## Returns the 64-bit Zobrist position key encoding piece placement, `current_turn`,
+## and any legally capturable `en_passant_target`.
+func get_position_key() -> int:
+	_ensure_spatial_index()
+	return _get_position_key_raw()
+
+
+## Returns the number of times the current position has occurred in the active game/search path.
+func get_repetition_count() -> int:
+	if _search_depth > 0 and not _position_history.is_empty():
+		return int(_position_counts.get(_position_history.back(), 0))
+	var key := get_position_key()
+	var cnt := int(_position_counts.get(key, 0))
+	if cnt == 0 and move_history.is_empty() and _position_history.size() <= 1 and _indexed_on_board_count > 0:
+		return 1
+	return cnt
+
+
+## Conservative Glinski Hexagonal Chess insufficient-material detection:
+## Returns true only for K vs K, K+B vs K, K+N vs K, and K+B vs K+B on the same hex shade.
+## Does NOT auto-draw K+2B, K+B+N, or opposite-shade K+B vs K+B.
+func is_insufficient_material() -> bool:
+	_ensure_spatial_index()
+	if _indexed_on_board_count > 4:
+		return false
+	if (
+		_cyan_king == null
+		or not is_inside_board(_cyan_king.grid_pos)
+		or _magenta_king == null
+		or not is_inside_board(_magenta_king.grid_pos)
+	):
+		return false
+	var cyan_bishops: int = 0
+	var magenta_bishops: int = 0
+	var cyan_knights: int = 0
+	var magenta_knights: int = 0
+	var cyan_bishop_shade: int = -1
+	var magenta_bishop_shade: int = -1
+	for p in pieces:
+		if p == null or not is_inside_board(p.grid_pos):
+			continue
+		match p.type:
+			PieceData.Type.KING:
+				continue
+			PieceData.Type.PAWN, PieceData.Type.ROOK, PieceData.Type.QUEEN:
+				return false
+			PieceData.Type.BISHOP:
+				if p.team == PieceData.Team.CYAN:
+					cyan_bishops += 1
+					cyan_bishop_shade = get_cell_color_index(p.grid_pos)
+				else:
+					magenta_bishops += 1
+					magenta_bishop_shade = get_cell_color_index(p.grid_pos)
+			PieceData.Type.KNIGHT:
+				if p.team == PieceData.Team.CYAN:
+					cyan_knights += 1
+				else:
+					magenta_knights += 1
+	var total_minors := cyan_bishops + magenta_bishops + cyan_knights + magenta_knights
+	if total_minors <= 1:
+		return true
+	if (
+		cyan_bishops == 1
+		and magenta_bishops == 1
+		and cyan_knights == 0
+		and magenta_knights == 0
+		and cyan_bishop_shade == magenta_bishop_shade
+	):
+		return true
+	return false
+
+
+func is_threefold_repetition() -> bool:
+	return get_repetition_count() >= THREEFOLD_REPETITION_COUNT
+
+
+func is_fifty_move_draw() -> bool:
+	return halfmove_clock >= FIFTY_MOVE_HALFMOVE_LIMIT
+
+
+## Removes all pieces from the board and resets all spatial index structures, history, game-over, draw tracking, and en-passant state.
 func clear_pieces() -> void:
 	pieces.clear()
+	move_history.clear()
 	_grid.fill(null)
 	_id_map.fill(null)
 	_cyan_king = null
 	_magenta_king = null
 	_indexed_piece_count = 0
 	_indexed_on_board_count = 0
+	_pieces_hash = 0
 	_search_depth = 0
 	en_passant_target = INVALID_HEX
 	en_passant_pawn_id = -1
+	halfmove_clock = 0
+	is_game_over = false
+	last_move = null
+	status_text = "Cyan's Turn"
+	_clear_position_history()
 
 
 ## Removes `piece` from the board and keeps the spatial grid, ID map, and King references synchronized.
@@ -252,6 +487,7 @@ func _remove_piece_raw(piece: PieceData) -> bool:
 		var grid_idx := (piece.grid_pos.x + BOARD_RADIUS) * GRID_SPAN + (piece.grid_pos.y + BOARD_RADIUS)
 		if _grid[grid_idx] == piece:
 			_grid[grid_idx] = null
+			_pieces_hash ^= _zobrist_piece_key(piece.team, piece.type, grid_idx)
 		_indexed_on_board_count -= 1
 	if piece.id > 0 and piece.id < _id_map.size() and _id_map[piece.id] == piece:
 		_id_map[piece.id] = null
@@ -275,10 +511,7 @@ func _find_king(team: PieceData.Team) -> PieceData:
 
 func reset_game() -> void:
 	clear_pieces()
-	move_history.clear()
 	current_turn = PieceData.Team.CYAN
-	is_game_over = false
-	last_move = null
 	_next_id = 1
 
 	# White / Cyan starting pieces (Bottom)
@@ -309,6 +542,7 @@ func reset_game() -> void:
 	for start_hex in _magenta_pawn_starts:
 		_spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.PAWN, start_hex)
 
+	_push_position_key(_get_position_key_raw())
 	_update_game_status()
 
 
@@ -318,7 +552,9 @@ func _spawn_piece(team: PieceData.Team, type: PieceData.Type, pos: Vector2i) -> 
 	_next_id += 1
 	pieces.append(p)
 	if is_inside_board(pos):
-		_grid[(pos.x + BOARD_RADIUS) * GRID_SPAN + (pos.y + BOARD_RADIUS)] = p
+		var grid_idx := (pos.x + BOARD_RADIUS) * GRID_SPAN + (pos.y + BOARD_RADIUS)
+		_grid[grid_idx] = p
+		_pieces_hash ^= _zobrist_piece_key(team, type, grid_idx)
 		_indexed_on_board_count += 1
 	if p.id >= _id_map.size():
 		_id_map.resize(p.id + 32)
@@ -334,16 +570,21 @@ func _spawn_piece(team: PieceData.Team, type: PieceData.Type, pos: Vector2i) -> 
 
 ## Creates an isolated copy of the current game state for AI search.
 func clone_state() -> GameRules:
+	_ensure_spatial_index()
 	var copy := GameRules.new(true)
 	copy.pieces = _clone_pieces_array()
 	copy.current_turn = current_turn
 	copy.en_passant_target = en_passant_target
 	copy.en_passant_pawn_id = en_passant_pawn_id
+	copy.halfmove_clock = halfmove_clock
+	copy._position_history = _position_history.duplicate()
+	copy._position_counts = _position_counts.duplicate()
 	copy.is_game_over = is_game_over
 	copy.status_text = status_text
 	copy.last_move = last_move.duplicate_move() if last_move != null else null
 	copy._next_id = _next_id
 	copy._rebuild_spatial_index()
+	copy._sync_initial_position_history()
 	return copy
 
 
@@ -395,6 +636,21 @@ func get_all_tactical_moves(team: PieceData.Team) -> Array[VectorMove]:
 ## Fast in-place move execution for AI search tree traversal (no string formatting or full array cloning).
 func push_search_move(move: VectorMove) -> Dictionary:
 	_ensure_spatial_index()
+	var seeded_root := false
+	var had_prev_single_key := false
+	var prev_single_key: int = 0
+	if _search_depth == 0:
+		var pre_key := _get_position_key_raw()
+		if _position_history.is_empty():
+			_push_position_key(pre_key)
+			seeded_root = true
+		elif move_history.is_empty() and _position_history.size() == 1 and _position_history[0] != pre_key:
+			prev_single_key = _position_history[0]
+			had_prev_single_key = true
+			_clear_position_history()
+			_push_position_key(pre_key)
+			seeded_root = true
+
 	var piece := _get_piece_by_id_raw(move.piece_id)
 	var target: PieceData = null
 	if move.is_en_passant:
@@ -405,16 +661,22 @@ func push_search_move(move: VectorMove) -> Dictionary:
 		target = _get_piece_at_raw(move.to)
 
 	var old_pos := piece.grid_pos
+	var old_type := piece.type
 	var undo_record := {
 		"piece": piece,
 		"old_pos": old_pos,
-		"old_type": piece.type,
+		"old_type": old_type,
 		"old_sides": piece.sides_count,
 		"old_has_moved": piece.has_moved,
 		"captured": target,
 		"old_turn": current_turn,
 		"old_ep_target": en_passant_target,
 		"old_ep_pawn_id": en_passant_pawn_id,
+		"old_halfmove_clock": halfmove_clock,
+		"old_pieces_hash": _pieces_hash,
+		"seeded_root": seeded_root,
+		"had_prev_single_key": had_prev_single_key,
+		"prev_single_key": prev_single_key,
 	}
 
 	if target != null:
@@ -422,6 +684,7 @@ func push_search_move(move: VectorMove) -> Dictionary:
 			var cap_idx := (target.grid_pos.x + BOARD_RADIUS) * GRID_SPAN + (target.grid_pos.y + BOARD_RADIUS)
 			if _grid[cap_idx] == target:
 				_grid[cap_idx] = null
+				_pieces_hash ^= _zobrist_piece_key(target.team, target.type, cap_idx)
 			_indexed_on_board_count -= 1
 		if target.id > 0 and target.id < _id_map.size():
 			_id_map[target.id] = null
@@ -435,6 +698,8 @@ func push_search_move(move: VectorMove) -> Dictionary:
 	var from_idx := (old_pos.x + BOARD_RADIUS) * GRID_SPAN + (old_pos.y + BOARD_RADIUS)
 	if _grid[from_idx] == piece:
 		_grid[from_idx] = null
+	_pieces_hash ^= _zobrist_piece_key(piece.team, old_type, from_idx)
+
 	var to_idx := (move.to.x + BOARD_RADIUS) * GRID_SPAN + (move.to.y + BOARD_RADIUS)
 	_grid[to_idx] = piece
 
@@ -445,6 +710,8 @@ func push_search_move(move: VectorMove) -> Dictionary:
 		piece.type = move.promotion_type
 		piece.sides_count = PieceData.get_polygon_sides(move.promotion_type)
 
+	_pieces_hash ^= _zobrist_piece_key(piece.team, piece.type, to_idx)
+
 	if move.is_double_step:
 		en_passant_target = move.en_passant_target
 		en_passant_pawn_id = piece.id
@@ -452,13 +719,21 @@ func push_search_move(move: VectorMove) -> Dictionary:
 		en_passant_target = INVALID_HEX
 		en_passant_pawn_id = -1
 
+	if old_type == PieceData.Type.PAWN or target != null:
+		halfmove_clock = 0
+	else:
+		halfmove_clock += 1
+
 	current_turn = PieceData.Team.MAGENTA if current_turn == PieceData.Team.CYAN else PieceData.Team.CYAN
+	_push_position_key(_get_position_key_raw())
 	_search_depth += 1
 	return undo_record
 
 
 ## Reverts a move previously applied with `push_search_move()`.
 func pop_search_move(undo_record: Dictionary) -> void:
+	_pop_position_key()
+
 	var piece: PieceData = undo_record["piece"]
 	var moved_pos := piece.grid_pos
 	var old_pos: Vector2i = undo_record["old_pos"]
@@ -494,7 +769,14 @@ func pop_search_move(undo_record: Dictionary) -> void:
 	current_turn = undo_record["old_turn"]
 	en_passant_target = undo_record["old_ep_target"]
 	en_passant_pawn_id = undo_record["old_ep_pawn_id"]
+	halfmove_clock = undo_record["old_halfmove_clock"]
+	_pieces_hash = undo_record["old_pieces_hash"]
 	_search_depth = maxi(0, _search_depth - 1)
+
+	if undo_record.get("seeded_root", false):
+		_pop_position_key()
+		if undo_record.get("had_prev_single_key", false):
+			_push_position_key(undo_record["prev_single_key"])
 
 
 ## Returns all 91 valid axial hex coordinates on the board.
@@ -653,16 +935,23 @@ func execute_move(move: VectorMove) -> bool:
 	elif dest_occ != null:
 		return false
 
+	_sync_initial_position_history()
+
 	var snapshot := {
 		"pieces": _clone_pieces_array(),
 		"current_turn": current_turn,
 		"en_passant_target": en_passant_target,
 		"en_passant_pawn_id": en_passant_pawn_id,
+		"halfmove_clock": halfmove_clock,
 		"is_game_over": is_game_over,
 		"status_text": status_text,
 		"last_move": last_move,
 		"notation": "",
 	}
+
+	var old_type := piece.type
+	var is_pawn_move := (old_type == PieceData.Type.PAWN)
+	var is_capture_move := (target != null)
 
 	if target != null:
 		_remove_piece_raw(target)
@@ -670,6 +959,8 @@ func execute_move(move: VectorMove) -> bool:
 	var from_idx := (piece.grid_pos.x + BOARD_RADIUS) * GRID_SPAN + (piece.grid_pos.y + BOARD_RADIUS)
 	if _grid[from_idx] == piece:
 		_grid[from_idx] = null
+	_pieces_hash ^= _zobrist_piece_key(piece.team, old_type, from_idx)
+
 	var to_idx := (move.to.x + BOARD_RADIUS) * GRID_SPAN + (move.to.y + BOARD_RADIUS)
 	_grid[to_idx] = piece
 
@@ -680,6 +971,8 @@ func execute_move(move: VectorMove) -> bool:
 		piece.type = move.promotion_type
 		piece.sides_count = PieceData.get_polygon_sides(move.promotion_type)
 
+	_pieces_hash ^= _zobrist_piece_key(piece.team, piece.type, to_idx)
+
 	if move.is_double_step:
 		en_passant_target = move.en_passant_target
 		en_passant_pawn_id = piece.id
@@ -687,11 +980,17 @@ func execute_move(move: VectorMove) -> bool:
 		en_passant_target = INVALID_HEX
 		en_passant_pawn_id = -1
 
+	if is_pawn_move or is_capture_move:
+		halfmove_clock = 0
+	else:
+		halfmove_clock += 1
+
 	snapshot["notation"] = format_move_notation(piece, move)
 	move_history.append(snapshot)
 
 	last_move = move
 	current_turn = PieceData.Team.MAGENTA if current_turn == PieceData.Team.CYAN else PieceData.Team.CYAN
+	_push_position_key(_get_position_key_raw())
 	_update_game_status()
 	return true
 
@@ -700,6 +999,7 @@ func undo_last_move() -> bool:
 	if move_history.is_empty():
 		return false
 	var snapshot: Dictionary = move_history.pop_back()
+	_pop_position_key()
 	pieces = snapshot["pieces"]
 	for p in pieces:
 		if p != null:
@@ -709,6 +1009,7 @@ func undo_last_move() -> bool:
 	current_turn = snapshot["current_turn"]
 	en_passant_target = snapshot["en_passant_target"]
 	en_passant_pawn_id = snapshot["en_passant_pawn_id"]
+	halfmove_clock = int(snapshot.get("halfmove_clock", 0))
 	is_game_over = snapshot["is_game_over"]
 	status_text = snapshot["status_text"]
 	last_move = snapshot["last_move"]
@@ -1087,6 +1388,9 @@ func _move_leaves_king_in_check(piece: PieceData, move: VectorMove) -> bool:
 
 
 func _update_game_status() -> void:
+	_ensure_spatial_index()
+	_sync_initial_position_history()
+	is_game_over = false
 	var team_name := "Cyan" if current_turn == PieceData.Team.CYAN else "Magenta"
 	var any_legal := has_any_legal_move(current_turn)
 	var in_check := is_king_in_check(current_turn)
@@ -1097,6 +1401,15 @@ func _update_game_status() -> void:
 			status_text = "CHECKMATE - %s Wins!" % other_team
 		else:
 			status_text = "STALEMATE - %s 0.75 : 0.25 %s" % [other_team, team_name]
+	elif is_insufficient_material():
+		is_game_over = true
+		status_text = "DRAW - Insufficient Material"
+	elif is_threefold_repetition():
+		is_game_over = true
+		status_text = "DRAW - Threefold Repetition"
+	elif is_fifty_move_draw():
+		is_game_over = true
+		status_text = "DRAW - 50-Move Rule"
 	else:
 		if in_check:
 			status_text = "%s's Turn - CHECK!" % team_name
