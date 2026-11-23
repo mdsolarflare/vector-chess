@@ -35,6 +35,7 @@ func _run_all_tests() -> void:
 	_test_piece_faceted_meshes()
 	_test_ai_player_move_selection()
 	await _test_ai_player_async_move_selection()
+	await _test_ai_player_tactical_correctness_and_search()
 	_test_software_renderer_detection()
 	_test_vector_board_caching_and_idle_redraw()
 	await _test_vector_board_atlas_and_aa_isolation()
@@ -1130,7 +1131,7 @@ func _test_ai_player_async_move_selection() -> void:
 		"choose_move_async with null SceneTree falls back cleanly across Easy, Medium, and Hard"
 	)
 
-	# Verify 1-pawn capture-promotion expands into 2 [=Q, =N] candidates (bypassing legal_moves.size() == 1 fast path):
+	# Verify 1-pawn capture-promotion expands into 4 [=Q, =N, =R, =B] candidates (bypassing legal_moves.size() == 1 fast path):
 	# Cyan King on f1 (0, 5) is immobilized by Magenta Rooks on e6/g6 and Bishop on d1, leaving e10xf11 as Cyan's sole raw move.
 	# Magenta King on a6 (-5, 0) is self-blocked except along the f11->a6 (-1, +1) ray, so e10xf11=Q# is mate in 1 (zero jitter).
 	var single_promo := GameRules.new()
@@ -1156,7 +1157,7 @@ func _test_ai_player_async_move_selection() -> void:
 		and promo_choice.is_capture
 		and promo_choice.captured_piece_id == promo_victim.id
 		and promo_choice.promotion_type == PieceData.Type.QUEEN,
-		"choose_move_async expands sole capture-promotion e10xf11 into [=Q, =N] and selects =Q"
+		"choose_move_async expands sole capture-promotion e10xf11 into [=Q, =N, =R, =B] and selects =Q"
 	)
 
 	# Verify _is_move_in_list rejects invalid promotion types (PAWN/KING) and mismatched capture metadata
@@ -1221,6 +1222,649 @@ func _test_ai_player_async_move_selection() -> void:
 	var over_choice := await ai.choose_move_async(forced, PieceData.Team.CYAN, AIPlayer.Difficulty.HARD, self)
 	_assert(over_choice == null, "choose_move_async returns null when no legal moves exist")
 
+
+func _has_mate_in_one(rules: GameRules, team: PieceData.Team) -> bool:
+	var moves := rules.get_all_legal_moves(team)
+	for mv in moves:
+		if mv.is_promotion:
+			for ptype in VALID_PROMOTION_TYPES:
+				var sim := rules.clone_state()
+				var variant := mv.duplicate_move()
+				variant.promotion_type = ptype
+				if sim.execute_move(variant) and sim.is_game_over and sim.status_text.begins_with("CHECKMATE"):
+					return true
+		else:
+			var sim := rules.clone_state()
+			if sim.execute_move(mv) and sim.is_game_over and sim.status_text.begins_with("CHECKMATE"):
+				return true
+	return false
+
+
+func _test_ai_player_tactical_correctness_and_search() -> void:
+	print("\n-- AIPlayer Tactical Correctness & Search (Issues #30, #31, #35, #45) --")
+	var ai := AIPlayer.new()
+
+	# ------------------------------------------------------------------
+	# Issue #30a: Medium avoids capturing a free pawn that allows Mate-in-1
+	# ------------------------------------------------------------------
+	# Magenta King on f11 (0, -5), Cyan Queen on g8 (1, -3), Cyan Rook on i7 (3, -4) defending g9/f10.
+	# Magenta Rook on a6 (-5, 0) can grab a free Cyan Pawn on a5 (-5, 1), but doing so allows Q g8->g9#.
+	var med_mate_rules := GameRules.new()
+	med_mate_rules.clear_pieces()
+	med_mate_rules._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.KING, GameRules.algebraic_to_axial("f11"))
+	med_mate_rules._spawn_piece(PieceData.Team.CYAN, PieceData.Type.KING, GameRules.algebraic_to_axial("f1"))
+	med_mate_rules._spawn_piece(PieceData.Team.CYAN, PieceData.Type.QUEEN, GameRules.algebraic_to_axial("g8"))
+	med_mate_rules._spawn_piece(PieceData.Team.CYAN, PieceData.Type.ROOK, GameRules.algebraic_to_axial("i7"))
+	var mag_rook := med_mate_rules._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.ROOK, GameRules.algebraic_to_axial("a6"))
+	var free_pawn_pos := GameRules.algebraic_to_axial("a5")
+	med_mate_rules._spawn_piece(PieceData.Team.CYAN, PieceData.Type.PAWN, free_pawn_pos)
+	med_mate_rules.current_turn = PieceData.Team.MAGENTA
+
+	var grab_pawn_mv: GameRules.VectorMove = null
+	for mv in med_mate_rules.get_legal_moves_for_piece(mag_rook):
+		if mv.to == free_pawn_pos:
+			grab_pawn_mv = mv
+			break
+	var blunder_sim := med_mate_rules.clone_state()
+	var grab_allows_mate := (
+		not med_mate_rules.is_king_in_check(PieceData.Team.MAGENTA)
+		and grab_pawn_mv != null
+		and blunder_sim.execute_move(grab_pawn_mv)
+		and _has_mate_in_one(blunder_sim, PieceData.Team.CYAN)
+	)
+	_assert(grab_allows_mate, "#30 setup: Magenta R a6xa5 allows immediate Cyan Mate-in-1 (Q g8->g9#)")
+
+	var med_defends_all := true
+	for seed_val in range(1, 11):
+		ai._rng.seed = seed_val
+		var med_choice := ai.choose_move(med_mate_rules, PieceData.Team.MAGENTA, AIPlayer.Difficulty.MEDIUM)
+		if med_choice == null or med_choice.to == free_pawn_pos:
+			med_defends_all = false
+			break
+		var after_med := med_mate_rules.clone_state()
+		if not after_med.execute_move(med_choice) or _has_mate_in_one(after_med, PieceData.Team.CYAN):
+			med_defends_all = false
+			break
+	ai._rng.seed = 42
+	var med_async_choice := await ai.choose_move_async(med_mate_rules, PieceData.Team.MAGENTA, AIPlayer.Difficulty.MEDIUM, self)
+	var after_med_async := med_mate_rules.clone_state()
+	var med_async_ok := (
+		med_async_choice != null
+		and med_async_choice.to != free_pawn_pos
+		and after_med_async.execute_move(med_async_choice)
+		and not _has_mate_in_one(after_med_async, PieceData.Team.CYAN)
+	)
+	_assert(
+		med_defends_all and med_async_ok,
+		"#30: Medium AI (sync across 10 seeds & async) rejects free pawn a6xa5 and prevents Cyan Mate-in-1"
+	)
+
+	# ------------------------------------------------------------------
+	# Issue #30b: Hard finds forced quiet Mate-in-2 over winning free material
+	# ------------------------------------------------------------------
+	var mate2_rules := GameRules.new()
+	mate2_rules.clear_pieces()
+	mate2_rules._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.KING, GameRules.algebraic_to_axial("e10"))
+	mate2_rules._spawn_piece(PieceData.Team.CYAN, PieceData.Type.KING, GameRules.algebraic_to_axial("l1"))
+	mate2_rules._spawn_piece(PieceData.Team.CYAN, PieceData.Type.ROOK, GameRules.algebraic_to_axial("d5"))
+	mate2_rules._spawn_piece(PieceData.Team.CYAN, PieceData.Type.ROOK, GameRules.algebraic_to_axial("i5"))
+	mate2_rules._spawn_piece(PieceData.Team.CYAN, PieceData.Type.ROOK, GameRules.algebraic_to_axial("h7"))
+	mate2_rules._spawn_piece(PieceData.Team.CYAN, PieceData.Type.BISHOP, GameRules.algebraic_to_axial("k4"))
+	var bait_knight_pos := GameRules.algebraic_to_axial("d2")
+	mate2_rules._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.KNIGHT, bait_knight_pos)
+	mate2_rules.current_turn = PieceData.Team.CYAN
+
+	_assert(
+		not mate2_rules.is_king_in_check(PieceData.Team.CYAN)
+		and not _has_mate_in_one(mate2_rules, PieceData.Team.CYAN),
+		"#30 setup: Hard Mate-in-2 position has no Mate-in-1 on ply 0"
+	)
+
+	ai._rng.seed = 7
+	var hard_m2 := ai.choose_move(mate2_rules, PieceData.Team.CYAN, AIPlayer.Difficulty.HARD)
+	ai._rng.seed = 7
+	var hard_m2_async := await ai.choose_move_async(mate2_rules, PieceData.Team.CYAN, AIPlayer.Difficulty.HARD, self)
+	var m2_sim := mate2_rules.clone_state()
+	var m2_forced_ok := false
+	if hard_m2 != null and not hard_m2.is_capture and m2_sim.execute_move(hard_m2):
+		var mag_replies := m2_sim.get_all_legal_moves(PieceData.Team.MAGENTA)
+		if mag_replies.size() > 0:
+			m2_forced_ok = true
+			for reply in mag_replies:
+				var reply_sim := m2_sim.clone_state()
+				if not reply_sim.execute_move(reply) or not _has_mate_in_one(reply_sim, PieceData.Team.CYAN):
+					m2_forced_ok = false
+					break
+	_assert(
+		hard_m2 != null
+		and hard_m2_async != null
+		and hard_m2.to != bait_knight_pos
+		and hard_m2_async.to != bait_knight_pos
+		and hard_m2.from == hard_m2_async.from
+		and hard_m2.to == hard_m2_async.to
+		and m2_forced_ok,
+		"#30: Hard AI (sync & async) finds forced quiet Mate-in-2 over capturing free Knight on d2"
+	)
+
+	# ------------------------------------------------------------------
+	# Issue #30c: _quiescence() check evasions, stand_pat disallowance, cap & Mate-in-1 preference
+	# ------------------------------------------------------------------
+	var qev_rules := GameRules.new()
+	qev_rules.clear_pieces()
+	qev_rules._spawn_piece(PieceData.Team.CYAN, PieceData.Type.KING, GameRules.algebraic_to_axial("a6"))
+	qev_rules._spawn_piece(PieceData.Team.CYAN, PieceData.Type.PAWN, GameRules.algebraic_to_axial("b6"))
+	qev_rules._spawn_piece(PieceData.Team.CYAN, PieceData.Type.PAWN, GameRules.algebraic_to_axial("c7"))
+	qev_rules._spawn_piece(PieceData.Team.CYAN, PieceData.Type.QUEEN, GameRules.algebraic_to_axial("l1"))
+	qev_rules._spawn_piece(PieceData.Team.CYAN, PieceData.Type.ROOK, GameRules.algebraic_to_axial("h2"))
+	qev_rules._spawn_piece(PieceData.Team.CYAN, PieceData.Type.BISHOP, GameRules.algebraic_to_axial("g2"))
+	qev_rules._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.KING, GameRules.algebraic_to_axial("d1"))
+	qev_rules._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.ROOK, GameRules.algebraic_to_axial("a5"))
+	qev_rules._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.ROOK, GameRules.algebraic_to_axial("f5"))
+	qev_rules._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.ROOK, GameRules.algebraic_to_axial("l6"))
+	qev_rules.current_turn = PieceData.Team.CYAN
+
+	var qev_stand_pat := AIPlayer.evaluate_board(qev_rules, PieceData.Team.CYAN)
+	var qev_score := ai._quiescence(qev_rules, -AIPlayer.INF_SCORE, 100, PieceData.Team.CYAN, 1, 3, AIPlayer.MAX_Q_CHECK_EXTENSIONS)
+	var qev_cap0_score := ai._quiescence(qev_rules, -AIPlayer.INF_SCORE, AIPlayer.INF_SCORE, PieceData.Team.CYAN, 1, 3, 0)
+	var qcm_rules := qev_rules.clone_state()
+	qcm_rules._spawn_piece(PieceData.Team.CYAN, PieceData.Type.PAWN, GameRules.algebraic_to_axial("b7"))
+	var qcm_cap0_score := ai._quiescence(qcm_rules, -AIPlayer.INF_SCORE, AIPlayer.INF_SCORE, PieceData.Team.CYAN, 1, 5, 0)
+	_assert(
+		qev_rules.is_king_in_check(PieceData.Team.CYAN)
+		and not qev_rules.is_king_in_check(PieceData.Team.MAGENTA)
+		and qev_rules.get_all_legal_moves(PieceData.Team.CYAN).size() == 1
+		and qev_stand_pat > 100
+		and qev_score < 0
+		and qev_cap0_score == qev_stand_pat
+		and qcm_cap0_score == -(AIPlayer.MATE_SCORE - 50),
+		"#30: _quiescence() disallows stand_pat in check (stand_pat=%d, score=%d), respects extension cap, and detects checkmate at cap=0" % [
+			qev_stand_pat,
+			qev_score,
+		]
+	)
+
+	var kcap_rules := GameRules.new()
+	kcap_rules.clear_pieces()
+	var kcap_king := kcap_rules._spawn_piece(PieceData.Team.CYAN, PieceData.Type.KING, GameRules.algebraic_to_axial("f6"))
+	kcap_rules._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.ROOK, GameRules.algebraic_to_axial("f7"))
+	kcap_rules._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.KING, GameRules.algebraic_to_axial("a1"))
+	var kcap_moves := kcap_rules.get_legal_moves_for_piece(kcap_king)
+	ai._order_moves(kcap_rules, kcap_moves)
+	_assert(
+		kcap_moves.size() > 1 and kcap_moves[0].is_capture and kcap_moves[0].to == GameRules.algebraic_to_axial("f7"),
+		"#30: MVV-LVA caps King attacker value so King capture K f6xf7 sorts before quiet evasion moves"
+	)
+
+	var m1_vs_m2 := GameRules.new()
+	m1_vs_m2.clear_pieces()
+	m1_vs_m2._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.KING, GameRules.algebraic_to_axial("f11"))
+	m1_vs_m2._spawn_piece(PieceData.Team.CYAN, PieceData.Type.KING, GameRules.algebraic_to_axial("f1"))
+	m1_vs_m2._spawn_piece(PieceData.Team.CYAN, PieceData.Type.QUEEN, GameRules.algebraic_to_axial("g8"))
+	m1_vs_m2._spawn_piece(PieceData.Team.CYAN, PieceData.Type.ROOK, GameRules.algebraic_to_axial("i7"))
+	m1_vs_m2.current_turn = PieceData.Team.CYAN
+	ai._rng.seed = 1
+	var m1_choice := ai.choose_move(m1_vs_m2, PieceData.Team.CYAN, AIPlayer.Difficulty.HARD)
+	var m1_sim := m1_vs_m2.clone_state()
+	_assert(
+		m1_choice != null and m1_sim.execute_move(m1_choice) and m1_sim.is_game_over and m1_sim.status_text.begins_with("CHECKMATE"),
+		"#30: Hard AI prefers immediate Mate-in-1 over slower forced mate lines"
+	)
+
+	# ------------------------------------------------------------------
+	# Issue #31: Multi-seed root jitter + beta cutoff never blunders
+	# ------------------------------------------------------------------
+	_assert(
+		AIPlayer.MATE_THRESHOLD == AIPlayer.MATE_SCORE - 1000,
+		"#31: MATE_THRESHOLD is widened to MATE_SCORE - 1000 for deeper quiescence ply mate scores"
+	)
+
+	# 31a: White-box test of shared _evaluate_root_move() fail-low guard and widened MATE_THRESHOLD guard
+	var wb_rules := GameRules.new()
+	wb_rules.clear_pieces()
+	wb_rules._spawn_piece(PieceData.Team.CYAN, PieceData.Type.KING, GameRules.algebraic_to_axial("a1"))
+	wb_rules._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.KING, GameRules.algebraic_to_axial("l6"))
+	var wb_queen := wb_rules._spawn_piece(PieceData.Team.CYAN, PieceData.Type.QUEEN, GameRules.algebraic_to_axial("f6"))
+	var wb_q_moves := wb_rules.get_legal_moves_for_piece(wb_queen)
+	var wb_safe_mv := wb_q_moves[0]
+	var wb_fail_low_mv := wb_q_moves[1]
+	var wb_fail_low_ok := true
+	for seed_val in range(1, 31):
+		ai._rng.seed = seed_val
+		var rs := AIPlayer._RootSearchState.new(wb_safe_mv)
+		rs.best_raw_score = 5000
+		rs.best_score = 5000
+		rs.has_best = true
+		ai._evaluate_root_move(wb_rules, wb_fail_low_mv, 2, false, 25, rs)
+		if rs.best_move != wb_safe_mv or rs.best_raw_score != 5000 or rs.best_score != 5000:
+			wb_fail_low_ok = false
+			break
+	var rs_deep_mate := AIPlayer._RootSearchState.new(wb_safe_mv)
+	rs_deep_mate.best_raw_score = AIPlayer.MATE_SCORE - 500
+	rs_deep_mate.best_score = AIPlayer.MATE_SCORE - 500
+	rs_deep_mate.has_best = true
+	ai._rng.seed = 99
+	ai._evaluate_root_move(wb_rules, wb_fail_low_mv, 2, false, 25, rs_deep_mate)
+	var rs_m1_exact := AIPlayer._RootSearchState.new(m1_choice)
+	ai._rng.seed = 99
+	ai._evaluate_root_move(m1_vs_m2, m1_choice, 2, false, 25, rs_m1_exact)
+	_assert(
+		wb_fail_low_ok
+		and rs_deep_mate.best_move == wb_safe_mv
+		and rs_deep_mate.best_raw_score == AIPlayer.MATE_SCORE - 500
+		and rs_m1_exact.best_score == rs_m1_exact.best_raw_score
+		and rs_m1_exact.best_raw_score >= AIPlayer.MATE_THRESHOLD,
+		"#31: _evaluate_root_move() discards fail-low upper bounds (30 seeds) and applies zero jitter to mate scores >= MATE_THRESHOLD"
+	)
+
+	# 31b: Real-board beta-cutoff + jitter trap (triggers 18/30 Med & 19/30 Hard Mate-in-1 blunders under pre-#31 loop)
+	var beta_trap_rules := GameRules.new()
+	beta_trap_rules.clear_pieces()
+	beta_trap_rules._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.KING, GameRules.algebraic_to_axial("f11"))
+	beta_trap_rules._spawn_piece(PieceData.Team.CYAN, PieceData.Type.KING, GameRules.algebraic_to_axial("l1"))
+	beta_trap_rules._spawn_piece(PieceData.Team.CYAN, PieceData.Type.QUEEN, GameRules.algebraic_to_axial("g8"))
+	beta_trap_rules._spawn_piece(PieceData.Team.CYAN, PieceData.Type.ROOK, GameRules.algebraic_to_axial("i7"))
+	beta_trap_rules._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.ROOK, GameRules.algebraic_to_axial("d7"))
+	beta_trap_rules._spawn_piece(PieceData.Team.CYAN, PieceData.Type.KNIGHT, GameRules.algebraic_to_axial("k3"))
+	beta_trap_rules._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.PAWN, GameRules.algebraic_to_axial("j1"))
+	beta_trap_rules.current_turn = PieceData.Team.MAGENTA
+
+	var trap_med_ok := true
+	var trap_hard_ok := true
+	for seed_val in range(1, 31):
+		ai._rng.seed = seed_val
+		var tm := ai.choose_move(beta_trap_rules, PieceData.Team.MAGENTA, AIPlayer.Difficulty.MEDIUM)
+		var tm_sim := beta_trap_rules.clone_state()
+		if tm == null or not tm_sim.execute_move(tm) or _has_mate_in_one(tm_sim, PieceData.Team.CYAN):
+			trap_med_ok = false
+			break
+
+		ai._rng.seed = seed_val
+		var th := ai.choose_move(beta_trap_rules, PieceData.Team.MAGENTA, AIPlayer.Difficulty.HARD)
+		var th_sim := beta_trap_rules.clone_state()
+		if th == null or not th_sim.execute_move(th) or _has_mate_in_one(th_sim, PieceData.Team.CYAN):
+			trap_hard_ok = false
+			break
+
+	ai._rng.seed = 19
+	var trap_async_med := await ai.choose_move_async(beta_trap_rules, PieceData.Team.MAGENTA, AIPlayer.Difficulty.MEDIUM, self)
+	var trap_async_med_sim := beta_trap_rules.clone_state()
+	ai._rng.seed = 19
+	var trap_async_hard := await ai.choose_move_async(beta_trap_rules, PieceData.Team.MAGENTA, AIPlayer.Difficulty.HARD, self)
+	var trap_async_hard_sim := beta_trap_rules.clone_state()
+	_assert(
+		trap_med_ok
+		and trap_hard_ok
+		and trap_async_med != null and trap_async_med_sim.execute_move(trap_async_med) and not _has_mate_in_one(trap_async_med_sim, PieceData.Team.CYAN)
+		and trap_async_hard != null and trap_async_hard_sim.execute_move(trap_async_hard) and not _has_mate_in_one(trap_async_hard_sim, PieceData.Team.CYAN),
+		"#31: Medium & Hard AI (30 deterministic seeds + async) never blunder quiet Mate-in-1 under early capture beta cutoffs + root jitter"
+	)
+
+	# 31c: Queen safety across 30 deterministic seeds + async
+	var jitter_rules := GameRules.new()
+	jitter_rules.clear_pieces()
+	jitter_rules._spawn_piece(PieceData.Team.CYAN, PieceData.Type.KING, GameRules.algebraic_to_axial("a1"))
+	jitter_rules._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.KING, GameRules.algebraic_to_axial("l6"))
+	var j_cyan_queen := jitter_rules._spawn_piece(PieceData.Team.CYAN, PieceData.Type.QUEEN, GameRules.algebraic_to_axial("e4"))
+	jitter_rules._spawn_piece(PieceData.Team.CYAN, PieceData.Type.PAWN, GameRules.algebraic_to_axial("c4"))
+	jitter_rules._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.PAWN, GameRules.algebraic_to_axial("d5"))
+	jitter_rules._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.ROOK, GameRules.algebraic_to_axial("f8"))
+	jitter_rules._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.BISHOP, GameRules.algebraic_to_axial("h7"))
+	jitter_rules._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.ROOK, GameRules.algebraic_to_axial("b7"))
+	jitter_rules.current_turn = PieceData.Team.CYAN
+
+	var med_no_blunder := true
+	var hard_no_blunder := true
+	for seed_val in range(1, 31):
+		ai._rng.seed = seed_val
+		var m_mv := ai.choose_move(jitter_rules, PieceData.Team.CYAN, AIPlayer.Difficulty.MEDIUM)
+		var m_sim := jitter_rules.clone_state()
+		if m_mv == null or not m_sim.execute_move(m_mv):
+			med_no_blunder = false
+			break
+		var q_after_m := m_sim.get_piece_by_id(j_cyan_queen.id)
+		if q_after_m == null or m_sim.is_cell_attacked(q_after_m.grid_pos, PieceData.Team.MAGENTA):
+			med_no_blunder = false
+			break
+
+		ai._rng.seed = seed_val
+		var h_mv := ai.choose_move(jitter_rules, PieceData.Team.CYAN, AIPlayer.Difficulty.HARD)
+		var h_sim := jitter_rules.clone_state()
+		if h_mv == null or not h_sim.execute_move(h_mv):
+			hard_no_blunder = false
+			break
+		var q_after_h := h_sim.get_piece_by_id(j_cyan_queen.id)
+		if q_after_h == null or h_sim.is_cell_attacked(q_after_h.grid_pos, PieceData.Team.MAGENTA):
+			hard_no_blunder = false
+			break
+
+	ai._rng.seed = 19
+	var async_j_med := await ai.choose_move_async(jitter_rules, PieceData.Team.CYAN, AIPlayer.Difficulty.MEDIUM, self)
+	var async_j_sim := jitter_rules.clone_state()
+	var q_after_async: PieceData = null
+	var async_j_exec := async_j_med != null and async_j_sim.execute_move(async_j_med)
+	if async_j_exec:
+		q_after_async = async_j_sim.get_piece_by_id(j_cyan_queen.id)
+	var async_j_ok := (
+		async_j_exec
+		and q_after_async != null
+		and not async_j_sim.is_cell_attacked(q_after_async.grid_pos, PieceData.Team.MAGENTA)
+	)
+	_assert(
+		med_no_blunder and hard_no_blunder and async_j_ok,
+		"#31: Medium & Hard AI (30 deterministic RNG seeds + async) never hang the Queen due to root jitter + beta cutoff"
+	)
+
+	# ------------------------------------------------------------------
+	# Issue #35: Consistent Glinski stalemate evaluation
+	# ------------------------------------------------------------------
+	var stale_for_stalemater := AIPlayer.evaluate_stalemate(PieceData.Team.CYAN, PieceData.Team.MAGENTA)
+	var stale_for_victim := AIPlayer.evaluate_stalemate(PieceData.Team.MAGENTA, PieceData.Team.MAGENTA)
+	_assert(
+		stale_for_stalemater > 0
+		and stale_for_victim == -stale_for_stalemater
+		and stale_for_stalemater + 25 < 72,
+		"#35: evaluate_stalemate() is strictly positive (>0), zero-sum, and below K+P vs K static eval even with Medium jitter (%d cp)" % stale_for_stalemater
+	)
+
+	# Winning K+P vs K endgame: Magenta King at a6 (-5, 0), Cyan King at c5 (-3, 1), Cyan Pawn at f5 (0, 1).
+	# K c5->c6 (-3, 0) immediately stalemates Magenta while static eval is +136 cp (< old 250 cp bug threshold).
+	var kp_rules := GameRules.new()
+	kp_rules.clear_pieces()
+	kp_rules._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.KING, GameRules.algebraic_to_axial("a6"))
+	var kp_cyan_king := kp_rules._spawn_piece(PieceData.Team.CYAN, PieceData.Type.KING, GameRules.algebraic_to_axial("c5"))
+	kp_rules._spawn_piece(PieceData.Team.CYAN, PieceData.Type.PAWN, GameRules.algebraic_to_axial("f5"))
+	kp_rules.current_turn = PieceData.Team.CYAN
+
+	var stale_trap_hex := GameRules.algebraic_to_axial("c6")
+	var trap_mv: GameRules.VectorMove = null
+	for mv in kp_rules.get_legal_moves_for_piece(kp_cyan_king):
+		if mv.to == stale_trap_hex:
+			trap_mv = mv
+			break
+	var trap_sim := kp_rules.clone_state()
+	var kp_static_eval := AIPlayer.evaluate_board(kp_rules, PieceData.Team.CYAN)
+	_assert(
+		trap_mv != null
+		and trap_sim.execute_move(trap_mv)
+		and trap_sim.is_game_over
+		and trap_sim.status_text.begins_with("STALEMATE")
+		and kp_static_eval > 0
+		and kp_static_eval < 250,
+		"#35 setup: K+P vs K has static eval +%d cp (<250) and K c5->c6 immediately stalemates Magenta" % kp_static_eval
+	)
+
+	var kp_avoids_stale := true
+	for seed_val in range(1, 11):
+		ai._rng.seed = seed_val
+		var kp_med := ai.choose_move(kp_rules, PieceData.Team.CYAN, AIPlayer.Difficulty.MEDIUM)
+		if kp_med == null or (kp_med.piece_id == kp_cyan_king.id and kp_med.to == stale_trap_hex):
+			kp_avoids_stale = false
+			break
+	ai._rng.seed = 3
+	var kp_hard := ai.choose_move(kp_rules, PieceData.Team.CYAN, AIPlayer.Difficulty.HARD)
+	ai._rng.seed = 3
+	var kp_hard_async := await ai.choose_move_async(kp_rules, PieceData.Team.CYAN, AIPlayer.Difficulty.HARD, self)
+	_assert(
+		kp_avoids_stale
+		and kp_hard != null and not (kp_hard.piece_id == kp_cyan_king.id and kp_hard.to == stale_trap_hex)
+		and kp_hard_async != null and not (kp_hard_async.piece_id == kp_cyan_king.id and kp_hard_async.to == stale_trap_hex),
+		"#35: Winning K+P vs K endgame avoids immediate stalemate trap K c5->c6 on Medium (10 seeds) & Hard (sync/async)"
+	)
+
+	# Equal K vs K endgame: stalemating opponent (0.75 pts) beats equal 0 draw across 10 seeds + async
+	var kk_rules := GameRules.new()
+	kk_rules.clear_pieces()
+	kk_rules._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.KING, GameRules.algebraic_to_axial("a6"))
+	kk_rules._spawn_piece(PieceData.Team.CYAN, PieceData.Type.KING, GameRules.algebraic_to_axial("c5"))
+	kk_rules.current_turn = PieceData.Team.CYAN
+	var kk_all_ok := true
+	for seed_val in range(1, 11):
+		ai._rng.seed = seed_val
+		var kk_med := ai.choose_move(kk_rules, PieceData.Team.CYAN, AIPlayer.Difficulty.MEDIUM)
+		ai._rng.seed = seed_val
+		var kk_hard := ai.choose_move(kk_rules, PieceData.Team.CYAN, AIPlayer.Difficulty.HARD)
+		if kk_med == null or kk_med.to != stale_trap_hex or kk_hard == null or kk_hard.to != stale_trap_hex:
+			kk_all_ok = false
+			break
+	ai._rng.seed = 5
+	var kk_async := await ai.choose_move_async(kk_rules, PieceData.Team.CYAN, AIPlayer.Difficulty.HARD, self)
+	_assert(
+		kk_all_ok and kk_async != null and kk_async.to == stale_trap_hex,
+		"#35: Equal K vs K endgame chooses K c5->c6 across 10 seeds (Medium/Hard + async) to claim Glinski 0.75 : 0.25 stalemate"
+	)
+
+	# Behind-in-material endgame: Easy, Medium, and Hard all claim Glinski stalemate (+40 cp) when losing badly (-932 cp)
+	var behind_stale_rules := GameRules.new()
+	behind_stale_rules.clear_pieces()
+	behind_stale_rules._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.KING, GameRules.algebraic_to_axial("a6"))
+	behind_stale_rules._spawn_piece(PieceData.Team.CYAN, PieceData.Type.KING, GameRules.algebraic_to_axial("c5"))
+	for m_alg in ["l6", "l5", "l4", "l3", "l2"]:
+		behind_stale_rules._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.PAWN, GameRules.algebraic_to_axial(m_alg))
+	behind_stale_rules._spawn_piece(PieceData.Team.CYAN, PieceData.Type.PAWN, GameRules.algebraic_to_axial("l1"))
+	behind_stale_rules.current_turn = PieceData.Team.CYAN
+	var behind_eval := AIPlayer.evaluate_board(behind_stale_rules, PieceData.Team.CYAN)
+	var behind_all_ok := behind_eval < -400
+	for seed_val in range(1, 11):
+		ai._rng.seed = seed_val
+		var be := ai.choose_move(behind_stale_rules, PieceData.Team.CYAN, AIPlayer.Difficulty.EASY)
+		ai._rng.seed = seed_val
+		var bm := ai.choose_move(behind_stale_rules, PieceData.Team.CYAN, AIPlayer.Difficulty.MEDIUM)
+		ai._rng.seed = seed_val
+		var bh := ai.choose_move(behind_stale_rules, PieceData.Team.CYAN, AIPlayer.Difficulty.HARD)
+		if (
+			be == null or be.to != stale_trap_hex
+			or bm == null or bm.to != stale_trap_hex
+			or bh == null or bh.to != stale_trap_hex
+		):
+			behind_all_ok = false
+			break
+	_assert(
+		behind_all_ok,
+		"#35: Losing endgame (eval=%d cp) claims Glinski stalemate K c5->c6 across Easy, Medium & Hard (10 seeds each)" % behind_eval
+	)
+
+	# Low-piece endgame leaf nodes (depth 0 & quiescence) detect stalemates instead of returning static eval
+	var leaf_stale := GameRules.new()
+	leaf_stale.clear_pieces()
+	leaf_stale._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.KING, GameRules.algebraic_to_axial("a6"))
+	leaf_stale._spawn_piece(PieceData.Team.CYAN, PieceData.Type.KING, GameRules.algebraic_to_axial("c6"))
+	leaf_stale._spawn_piece(PieceData.Team.CYAN, PieceData.Type.PAWN, GameRules.algebraic_to_axial("f5"))
+	leaf_stale.current_turn = PieceData.Team.MAGENTA
+	var leaf_stale_med := ai._negamax(leaf_stale, 0, -AIPlayer.INF_SCORE, AIPlayer.INF_SCORE, PieceData.Team.MAGENTA, 2, false)
+	var leaf_stale_hard := ai._negamax(leaf_stale, 0, -AIPlayer.INF_SCORE, AIPlayer.INF_SCORE, PieceData.Team.MAGENTA, 3, true)
+	_assert(
+		leaf_stale_med == -AIPlayer.STALEMATE_BONUS and leaf_stale_hard == -AIPlayer.STALEMATE_BONUS,
+		"#35: Low-piece endgame leaf nodes return evaluate_stalemate() (-%d cp) on both Medium and Hard" % AIPlayer.STALEMATE_BONUS
+	)
+
+	# ------------------------------------------------------------------
+	# Issue #45: Underpromotion expansion (root =R/=B anti-stalemate & multi-ply =N)
+	# ------------------------------------------------------------------
+	# 45a: GameRules.get_legal_moves_for_piece() emits 1 VectorMove per promotion hex;
+	# _expand_promotions() clones [Q,N,R,B] at root and [Q,N] in search without mutating input.
+	var ux_promo_rules := GameRules.new()
+	ux_promo_rules.clear_pieces()
+	ux_promo_rules._spawn_piece(PieceData.Team.CYAN, PieceData.Type.KING, GameRules.algebraic_to_axial("a1"))
+	ux_promo_rules._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.KING, GameRules.algebraic_to_axial("l1"))
+	var ux_pawn := ux_promo_rules._spawn_piece(PieceData.Team.CYAN, PieceData.Type.PAWN, GameRules.algebraic_to_axial("f10"))
+	var ux_moves := ux_promo_rules.get_legal_moves_for_piece(ux_pawn)
+	var ux_orig_promo_type := ux_moves[0].promotion_type
+	var ux_expanded_root := ai._expand_promotions(ux_moves, true)
+	var ux_expanded_search := ai._expand_promotions(ux_moves, false)
+	_assert(
+		ux_moves.size() == 1
+		and ux_moves[0].is_promotion
+		and ux_moves[0].promotion_type == ux_orig_promo_type
+		and ux_expanded_root.size() == 4
+		and ux_expanded_search.size() == 2
+		and ux_expanded_root[0] != ux_moves[0],
+		"#45: GameRules emits 1 VectorMove per promotion hex for VectorBoard UI; _expand_promotions() clones [Q,N,R,B] at root and [Q,N] in search without mutating input"
+	)
+
+	# 45b: Root =R anti-stalemate underpromotion (Medium & Hard, sync/async)
+	var under_r_rules := GameRules.new()
+	under_r_rules.clear_pieces()
+	under_r_rules._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.KING, GameRules.algebraic_to_axial("a6"))
+	under_r_rules._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.PAWN, GameRules.algebraic_to_axial("a5"))
+	under_r_rules._spawn_piece(PieceData.Team.CYAN, PieceData.Type.PAWN, GameRules.algebraic_to_axial("a4"))
+	under_r_rules._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.PAWN, GameRules.algebraic_to_axial("c7"))
+	under_r_rules._spawn_piece(PieceData.Team.CYAN, PieceData.Type.PAWN, GameRules.algebraic_to_axial("c6"))
+	under_r_rules._spawn_piece(PieceData.Team.CYAN, PieceData.Type.PAWN, GameRules.algebraic_to_axial("e8"))
+	under_r_rules._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.PAWN, GameRules.algebraic_to_axial("e9"))
+	under_r_rules._spawn_piece(PieceData.Team.CYAN, PieceData.Type.KING, GameRules.algebraic_to_axial("c5"))
+	var ur_pawn := under_r_rules._spawn_piece(PieceData.Team.CYAN, PieceData.Type.PAWN, GameRules.algebraic_to_axial("k6"))
+	under_r_rules.current_turn = PieceData.Team.CYAN
+
+	var k7_hex := GameRules.algebraic_to_axial("k7")
+	var ur_base_mv := under_r_rules.get_legal_moves_for_piece(ur_pawn)[0]
+	var q_stales := under_r_rules.clone_state()
+	var q_mv := ur_base_mv.duplicate_move()
+	q_mv.promotion_type = PieceData.Type.QUEEN
+	q_stales.execute_move(q_mv)
+	var b_stales := under_r_rules.clone_state()
+	var b_mv := ur_base_mv.duplicate_move()
+	b_mv.promotion_type = PieceData.Type.BISHOP
+	b_stales.execute_move(b_mv)
+	var r_lives := under_r_rules.clone_state()
+	var r_mv := ur_base_mv.duplicate_move()
+	r_mv.promotion_type = PieceData.Type.ROOK
+	r_lives.execute_move(r_mv)
+	_assert(
+		q_stales.is_game_over and q_stales.status_text.begins_with("STALEMATE")
+		and b_stales.is_game_over and b_stales.status_text.begins_with("STALEMATE")
+		and not r_lives.is_game_over,
+		"#45 setup: k6->k7=Q and =B stalemate Magenta on a6, while k6->k7=R keeps Magenta alive"
+	)
+
+	ai._rng.seed = 11
+	var ur_med := ai.choose_move(under_r_rules, PieceData.Team.CYAN, AIPlayer.Difficulty.MEDIUM)
+	ai._rng.seed = 11
+	var ur_hard := ai.choose_move(under_r_rules, PieceData.Team.CYAN, AIPlayer.Difficulty.HARD)
+	ai._rng.seed = 11
+	var ur_hard_async := await ai.choose_move_async(under_r_rules, PieceData.Team.CYAN, AIPlayer.Difficulty.HARD, self)
+	_assert(
+		ur_med != null and ur_med.is_promotion and ur_med.to == k7_hex and ur_med.promotion_type == PieceData.Type.ROOK
+		and ur_hard != null and ur_hard.is_promotion and ur_hard.to == k7_hex and ur_hard.promotion_type == PieceData.Type.ROOK
+		and ur_hard_async != null and ur_hard_async.is_promotion and ur_hard_async.to == k7_hex and ur_hard_async.promotion_type == PieceData.Type.ROOK,
+		"#45: Root anti-stalemate underpromotion selects k6->k7=R on Medium & Hard (sync/async)"
+	)
+
+	# 45c: Root =B anti-stalemate underpromotion (seed-robust across 20 seeds on Medium + async):
+	# Knight on d6 covers a5; shade-2 Bishop on f2 pairs with g9->g10=B (+40 cp over =N > 25 cp jitter).
+	var under_b_rules := GameRules.new()
+	under_b_rules.clear_pieces()
+	under_b_rules._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.KING, GameRules.algebraic_to_axial("a6"))
+	under_b_rules._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.PAWN, GameRules.algebraic_to_axial("b7"))
+	under_b_rules._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.PAWN, GameRules.algebraic_to_axial("b6"))
+	under_b_rules._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.PAWN, GameRules.algebraic_to_axial("b5"))
+	under_b_rules._spawn_piece(PieceData.Team.CYAN, PieceData.Type.PAWN, GameRules.algebraic_to_axial("b4"))
+	under_b_rules._spawn_piece(PieceData.Team.CYAN, PieceData.Type.KNIGHT, GameRules.algebraic_to_axial("d6"))
+	under_b_rules._spawn_piece(PieceData.Team.CYAN, PieceData.Type.BISHOP, GameRules.algebraic_to_axial("f2"))
+	under_b_rules._spawn_piece(PieceData.Team.CYAN, PieceData.Type.KING, GameRules.algebraic_to_axial("f1"))
+	var ub_pawn := under_b_rules._spawn_piece(PieceData.Team.CYAN, PieceData.Type.PAWN, GameRules.algebraic_to_axial("g9"))
+	under_b_rules.current_turn = PieceData.Team.CYAN
+
+	var g10_hex := GameRules.algebraic_to_axial("g10")
+	var ub_base_mv := under_b_rules.get_legal_moves_for_piece(ub_pawn)[0]
+	var ub_q := under_b_rules.clone_state()
+	var ub_q_mv := ub_base_mv.duplicate_move()
+	ub_q_mv.promotion_type = PieceData.Type.QUEEN
+	ub_q.execute_move(ub_q_mv)
+	var ub_r := under_b_rules.clone_state()
+	var ub_r_mv := ub_base_mv.duplicate_move()
+	ub_r_mv.promotion_type = PieceData.Type.ROOK
+	ub_r.execute_move(ub_r_mv)
+	var ub_b := under_b_rules.clone_state()
+	var ub_b_mv := ub_base_mv.duplicate_move()
+	ub_b_mv.promotion_type = PieceData.Type.BISHOP
+	ub_b.execute_move(ub_b_mv)
+	_assert(
+		ub_q.is_game_over and ub_q.status_text.begins_with("STALEMATE")
+		and ub_r.is_game_over and ub_r.status_text.begins_with("STALEMATE")
+		and not ub_b.is_game_over,
+		"#45 setup: g9->g10=Q and =R stalemate Magenta on a6, while g9->g10=B keeps Magenta alive"
+	)
+	var ub_all_seeds_ok := true
+	for seed_val in range(1, 21):
+		ai._rng.seed = seed_val
+		var ub_med := ai.choose_move(under_b_rules, PieceData.Team.CYAN, AIPlayer.Difficulty.MEDIUM)
+		if ub_med == null or not ub_med.is_promotion or ub_med.to != g10_hex or ub_med.promotion_type != PieceData.Type.BISHOP:
+			ub_all_seeds_ok = false
+			break
+	ai._rng.seed = 47
+	var ub_med_async := await ai.choose_move_async(under_b_rules, PieceData.Team.CYAN, AIPlayer.Difficulty.MEDIUM, self)
+	_assert(
+		ub_all_seeds_ok
+		and ub_med_async != null and ub_med_async.is_promotion and ub_med_async.to == g10_hex and ub_med_async.promotion_type == PieceData.Type.BISHOP,
+		"#45: Root anti-stalemate underpromotion selects g9->g10=B across 20 seeds (Medium + async) when =Q and =R stalemate"
+	)
+
+	# 45d: Multi-ply =N tactical underpromotion (internal _negamax node)
+	var mp_n_rules := GameRules.new()
+	mp_n_rules.clear_pieces()
+	mp_n_rules._spawn_piece(PieceData.Team.CYAN, PieceData.Type.KING, GameRules.algebraic_to_axial("b1"))
+	mp_n_rules._spawn_piece(PieceData.Team.CYAN, PieceData.Type.PAWN, GameRules.algebraic_to_axial("f10"))
+	mp_n_rules._spawn_piece(PieceData.Team.CYAN, PieceData.Type.ROOK, GameRules.algebraic_to_axial("l5"))
+	mp_n_rules._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.KING, GameRules.algebraic_to_axial("i8"))
+	for blk_alg in ["h9", "i7", "h7", "g8", "g9", "i6", "g7", "f9", "g10", "k6"]:
+		mp_n_rules._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.PAWN, GameRules.algebraic_to_axial(blk_alg))
+	var bait_rook_pos := GameRules.algebraic_to_axial("h6")
+	mp_n_rules._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.ROOK, bait_rook_pos)
+	mp_n_rules.current_turn = PieceData.Team.CYAN
+
+	var l6_hex := GameRules.algebraic_to_axial("l6")
+	var h8_hex := GameRules.algebraic_to_axial("h8")
+	var f11_hex := GameRules.algebraic_to_axial("f11")
+
+	ai._rng.seed = 21
+	var mp_move1 := ai.choose_move(mp_n_rules, PieceData.Team.CYAN, AIPlayer.Difficulty.HARD)
+	ai._rng.seed = 21
+	var mp_move1_async := await ai.choose_move_async(mp_n_rules, PieceData.Team.CYAN, AIPlayer.Difficulty.HARD, self)
+	var mp_sim := mp_n_rules.clone_state()
+	var mp_line_ok := false
+	if mp_move1 != null and mp_move1.to == l6_hex and mp_sim.execute_move(mp_move1):
+		var mag_forced := mp_sim.get_all_legal_moves(PieceData.Team.MAGENTA)
+		if mag_forced.size() == 1 and mag_forced[0].to == h8_hex and mp_sim.execute_move(mag_forced[0]):
+			var mp_move2 := ai.choose_move(mp_sim, PieceData.Team.CYAN, AIPlayer.Difficulty.HARD)
+			if (
+				mp_move2 != null
+				and mp_move2.is_promotion
+				and mp_move2.to == f11_hex
+				and mp_move2.promotion_type == PieceData.Type.KNIGHT
+				and mp_sim.execute_move(mp_move2)
+				and mp_sim.is_game_over
+				and mp_sim.status_text.begins_with("CHECKMATE")
+			):
+				mp_line_ok = true
+	_assert(
+		mp_move1 != null
+		and mp_move1_async != null
+		and mp_move1.to == l6_hex
+		and mp_move1_async.to == l6_hex
+		and mp_line_ok,
+		"#45: Hard AI (sync & async) sees internal ply-2 f10->f11=N# mate and plays R l5->l6+ over capturing free Rook on h6"
+	)
+
+	# 45e: Direct _quiescence() =N underpromotion test (detects smothered checkmate despite -2095 cp stand_pat)
+	var q_n_rules := GameRules.new()
+	q_n_rules.clear_pieces()
+	q_n_rules._spawn_piece(PieceData.Team.CYAN, PieceData.Type.KING, GameRules.algebraic_to_axial("a1"))
+	q_n_rules._spawn_piece(PieceData.Team.CYAN, PieceData.Type.PAWN, GameRules.algebraic_to_axial("f10"))
+	q_n_rules._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.QUEEN, GameRules.algebraic_to_axial("d2"))
+	var qn_mk := GameRules.algebraic_to_axial("h8")
+	q_n_rules._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.KING, qn_mk)
+	for d in GameRules.ORTHO_DIRS + GameRules.DIAG_DIRS:
+		var adj: Vector2i = qn_mk + d
+		if GameRules.is_inside_board(adj):
+			q_n_rules._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.PAWN, adj)
+	q_n_rules.current_turn = PieceData.Team.CYAN
+	var q_n_score := ai._quiescence(q_n_rules, -AIPlayer.INF_SCORE, AIPlayer.INF_SCORE, PieceData.Team.CYAN, 1, 3, AIPlayer.MAX_Q_CHECK_EXTENSIONS)
+	_assert(
+		not q_n_rules.is_king_in_check(PieceData.Team.CYAN)
+		and AIPlayer.evaluate_board(q_n_rules, PieceData.Team.CYAN) < -1000
+		and q_n_score == AIPlayer.MATE_SCORE - 40,
+		"#45: _quiescence() expands =N underpromotion and finds smothered checkmate f10->f11=N# (score=%d)" % q_n_score
+	)
 
 func _test_software_renderer_detection() -> void:
 	print("\n-- Software Renderer Detection & Fallback --")

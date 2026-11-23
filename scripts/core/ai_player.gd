@@ -13,9 +13,30 @@ enum Difficulty {
 const DIFFICULTY_NAMES: Array[String] = ["Easy", "Medium", "Hard"]
 
 const MATE_SCORE: int = 100000
+const MATE_THRESHOLD: int = MATE_SCORE - 1000
 const INF_SCORE: int = 1000000
 ## Frame time budget in microseconds (~8ms) before yielding on single-threaded Web builds
 const ASYNC_FRAME_BUDGET_USEC: int = 8000
+## Maximum consecutive check-evasion extensions allowed inside quiescence search
+const MAX_Q_CHECK_EXTENSIONS: int = 2
+## Glinski 0.75 : 0.25 stalemate score bonus for the stalemating side (in centipawns).
+## Strictly above a 0 draw when equal/behind, yet strictly below any winning low-material
+## endgame (e.g. K+P vs K >= +72 cp) even after Medium root jitter (+25 cp).
+const STALEMATE_BONUS: int = 40
+## Piece-count threshold below which leaf nodes also check for non-check stalemates
+const ENDGAME_STALEMATE_CHECK_MAX_PIECES: int = 8
+
+const ROOT_PROMOTION_TYPES: Array[PieceData.Type] = [
+	PieceData.Type.QUEEN,
+	PieceData.Type.KNIGHT,
+	PieceData.Type.ROOK,
+	PieceData.Type.BISHOP,
+]
+
+const SEARCH_PROMOTION_TYPES: Array[PieceData.Type] = [
+	PieceData.Type.QUEEN,
+	PieceData.Type.KNIGHT,
+]
 
 const PIECE_VALUES: Dictionary = {
 	PieceData.Type.PAWN: 100,
@@ -25,6 +46,17 @@ const PIECE_VALUES: Dictionary = {
 	PieceData.Type.QUEEN: 950,
 	PieceData.Type.KING: 20000,
 }
+
+
+class _RootSearchState extends RefCounted:
+	var best_move: GameRules.VectorMove
+	var best_raw_score: int = -INF_SCORE
+	var best_score: int = -INF_SCORE
+	var has_best: bool = false
+
+	func _init(initial_move: GameRules.VectorMove) -> void:
+		best_move = initial_move
+
 
 var _rng := RandomNumberGenerator.new()
 
@@ -38,10 +70,19 @@ static func get_difficulty_name(diff: Difficulty) -> String:
 	return DIFFICULTY_NAMES[idx]
 
 
+## Returns the Glinski stalemate (0.75 : 0.25) score from `perspective_team`'s point of view
+## when `stalemated_team` has no legal moves and is not in check.
+static func evaluate_stalemate(
+	perspective_team: PieceData.Team,
+	stalemated_team: PieceData.Team
+) -> int:
+	return -STALEMATE_BONUS if perspective_team == stalemated_team else STALEMATE_BONUS
+
+
 ## Chooses the best legal move for `ai_team` on a cloned `GameRules` state.
 func choose_move(source_rules: GameRules, ai_team: PieceData.Team, difficulty: Difficulty) -> GameRules.VectorMove:
 	var state := source_rules.clone_state()
-	var legal_moves := _expand_promotions(state.get_all_legal_moves(ai_team))
+	var legal_moves := _expand_promotions(state.get_all_legal_moves(ai_team), true)
 	if legal_moves.is_empty():
 		return null
 	if legal_moves.size() == 1:
@@ -68,26 +109,25 @@ func choose_move_async(
 	tree: SceneTree
 ) -> GameRules.VectorMove:
 	var state := source_rules.clone_state()
-	var legal_moves := _expand_promotions(state.get_all_legal_moves(ai_team))
+	var legal_moves := _expand_promotions(state.get_all_legal_moves(ai_team), true)
 	if legal_moves.is_empty():
 		return null
 	if legal_moves.size() == 1:
 		return legal_moves[0]
 
-	if tree == null or difficulty == Difficulty.EASY:
-		return _choose_easy_move(state, legal_moves, ai_team) if difficulty == Difficulty.EASY else choose_move(state, ai_team, difficulty)
+	if difficulty == Difficulty.EASY:
+		return _choose_easy_move(state, legal_moves, ai_team)
 
 	var max_depth := 2 if difficulty == Difficulty.MEDIUM else 3
 	var use_quiescence := (difficulty == Difficulty.HARD)
 	var jitter_range := 25 if difficulty == Difficulty.MEDIUM else 6
 
+	if tree == null:
+		return _choose_search_move(state, legal_moves, ai_team, max_depth, use_quiescence, jitter_range)
+
 	_order_moves(state, legal_moves)
 
-	var best_move: GameRules.VectorMove = legal_moves[0]
-	var best_raw_score: int = -INF_SCORE
-	var best_score: int = -INF_SCORE
-	var beta: int = INF_SCORE
-	var has_best: bool = false
+	var root_state := _RootSearchState.new(legal_moves[0])
 	var slice_start_usec := Time.get_ticks_usec()
 
 	for mv in legal_moves:
@@ -95,42 +135,9 @@ func choose_move_async(
 			await tree.process_frame
 			slice_start_usec = Time.get_ticks_usec()
 
-		var search_alpha: int = -INF_SCORE
-		if has_best:
-			if jitter_range > 0 and absi(best_raw_score) < MATE_SCORE - 100:
-				search_alpha = best_raw_score - jitter_range
-			else:
-				search_alpha = best_raw_score
+		_evaluate_root_move(state, mv, max_depth, use_quiescence, jitter_range, root_state)
 
-		var undo := state.push_search_move(mv)
-		var raw_score := -_negamax(
-			state,
-			max_depth - 1,
-			-beta,
-			-search_alpha,
-			state.current_turn,
-			1,
-			use_quiescence
-		)
-		state.pop_search_move(undo)
-
-		# Fail-low cutoffs return an upper bound <= search_alpha; never jitter them above best_move
-		if has_best and raw_score <= search_alpha:
-			continue
-
-		if not has_best or raw_score > best_raw_score:
-			best_raw_score = raw_score
-
-		var score := raw_score
-		if jitter_range > 0 and absi(raw_score) < MATE_SCORE - 100:
-			score += _rng.randi_range(0, jitter_range)
-
-		if not has_best or score > best_score:
-			best_score = score
-			best_move = mv
-			has_best = true
-
-	return best_move
+	return root_state.best_move
 
 
 func _choose_easy_move(
@@ -144,13 +151,12 @@ func _choose_easy_move(
 	for mv in legal_moves:
 		var undo := state.push_search_move(mv)
 		var enemy_team := state.current_turn
-		var enemy_moves := state.get_all_legal_moves(enemy_team)
 		var score: int
-		if enemy_moves.is_empty():
+		if not state.has_any_legal_move(enemy_team):
 			if state.is_king_in_check(enemy_team):
 				score = MATE_SCORE
 			else:
-				score = 0
+				score = evaluate_stalemate(ai_team, enemy_team)
 		else:
 			score = evaluate_board(state, ai_team)
 			# Add generous noise so Novice plays casually and makes human-like tactical oversights
@@ -176,50 +182,59 @@ func _choose_search_move(
 ) -> GameRules.VectorMove:
 	_order_moves(state, legal_moves)
 
-	var best_move: GameRules.VectorMove = legal_moves[0]
-	var best_raw_score: int = -INF_SCORE
-	var best_score: int = -INF_SCORE
-	var beta: int = INF_SCORE
-	var has_best: bool = false
-
+	var root_state := _RootSearchState.new(legal_moves[0])
 	for mv in legal_moves:
-		var search_alpha: int = -INF_SCORE
-		if has_best:
-			if jitter_range > 0 and absi(best_raw_score) < MATE_SCORE - 100:
-				search_alpha = best_raw_score - jitter_range
-			else:
-				search_alpha = best_raw_score
+		_evaluate_root_move(state, mv, max_depth, use_quiescence, jitter_range, root_state)
 
-		var undo := state.push_search_move(mv)
-		var raw_score := -_negamax(
-			state,
-			max_depth - 1,
-			-beta,
-			-search_alpha,
-			state.current_turn,
-			1,
-			use_quiescence
-		)
-		state.pop_search_move(undo)
+	return root_state.best_move
 
-		# Fail-low cutoffs return an upper bound <= search_alpha; never jitter them above best_move
-		if has_best and raw_score <= search_alpha:
-			continue
 
-		if not has_best or raw_score > best_raw_score:
-			best_raw_score = raw_score
+## Shared root-move evaluation helper for synchronous and async search loops.
+## Keeps alpha relaxed by `jitter_range` for non-mate scores and discards fail-low upper bounds
+## so post-search tie-breaking jitter can never promote a pruned blunder above `best_move`.
+func _evaluate_root_move(
+	state: GameRules,
+	mv: GameRules.VectorMove,
+	max_depth: int,
+	use_quiescence: bool,
+	jitter_range: int,
+	root_state: _RootSearchState
+) -> void:
+	var search_alpha: int = -INF_SCORE
+	if root_state.has_best:
+		if jitter_range > 0 and absi(root_state.best_raw_score) < MATE_THRESHOLD:
+			search_alpha = root_state.best_raw_score - jitter_range
+		else:
+			search_alpha = root_state.best_raw_score
 
-		# Small tie-breaking jitter among near-equal moves so games stay varied
-		var score := raw_score
-		if jitter_range > 0 and absi(raw_score) < MATE_SCORE - 100:
-			score += _rng.randi_range(0, jitter_range)
+	var undo := state.push_search_move(mv)
+	var raw_score := -_negamax(
+		state,
+		max_depth - 1,
+		-INF_SCORE,
+		-search_alpha,
+		state.current_turn,
+		1,
+		use_quiescence
+	)
+	state.pop_search_move(undo)
 
-		if not has_best or score > best_score:
-			best_score = score
-			best_move = mv
-			has_best = true
+	# Fail-low cutoffs return an upper bound <= search_alpha; never jitter them above best_move
+	if root_state.has_best and raw_score <= search_alpha:
+		return
 
-	return best_move
+	if not root_state.has_best or raw_score > root_state.best_raw_score:
+		root_state.best_raw_score = raw_score
+
+	# Small tie-breaking jitter among near-equal non-mate moves so games stay varied
+	var score := raw_score
+	if jitter_range > 0 and absi(raw_score) < MATE_THRESHOLD:
+		score += _rng.randi_range(0, jitter_range)
+
+	if not root_state.has_best or score > root_state.best_score:
+		root_state.best_score = score
+		root_state.best_move = mv
+		root_state.has_best = true
 
 
 func _negamax(
@@ -231,18 +246,22 @@ func _negamax(
 	ply: int,
 	use_quiescence: bool
 ) -> int:
-	# Cut off at depth-0 leaf nodes BEFORE generating all legal moves
+	# Cut off at depth-0 leaf nodes BEFORE generating all legal moves (except checks and low-piece endgames)
 	if depth <= 0:
 		if use_quiescence:
-			return _quiescence(state, alpha, beta, perspective_team, 1)
+			return _quiescence(state, alpha, beta, perspective_team, 1, ply, MAX_Q_CHECK_EXTENSIONS)
+		if state.is_king_in_check(perspective_team):
+			if not state.has_any_legal_move(perspective_team):
+				return -(MATE_SCORE - ply * 10)
+		elif state.pieces.size() <= ENDGAME_STALEMATE_CHECK_MAX_PIECES and not state.has_any_legal_move(perspective_team):
+			return evaluate_stalemate(perspective_team, perspective_team)
 		return evaluate_board(state, perspective_team)
 
 	var moves := _expand_promotions(state.get_all_legal_moves(perspective_team), false)
 	if moves.is_empty():
 		if state.is_king_in_check(perspective_team):
 			return -(MATE_SCORE - ply * 10)
-		# Glinski stalemate is 0.75 : 0.25 in favor of the stalemating player
-		return -250
+		return evaluate_stalemate(perspective_team, perspective_team)
 
 	_order_moves(state, moves)
 
@@ -270,17 +289,57 @@ func _negamax(
 	return best_val
 
 
-## 1-ply capture/promotion quiescence search to prevent horizon-effect blunders on Hard difficulty.
+## Capture/promotion quiescence search with legal check evasions to prevent horizon-effect blunders
+## and detect leaf-node checkmates on Hard difficulty.
 func _quiescence(
 	state: GameRules,
 	alpha: int,
 	beta: int,
 	perspective_team: PieceData.Team,
-	q_depth: int
+	q_depth: int,
+	ply: int,
+	check_extensions_left: int = MAX_Q_CHECK_EXTENSIONS
 ) -> int:
+	if state.is_king_in_check(perspective_team):
+		if check_extensions_left <= 0:
+			if not state.has_any_legal_move(perspective_team):
+				return -(MATE_SCORE - ply * 10)
+			return evaluate_board(state, perspective_team)
+
+		var evasions := _expand_promotions(state.get_all_legal_moves(perspective_team), false)
+		if evasions.is_empty():
+			return -(MATE_SCORE - ply * 10)
+
+		_order_moves(state, evasions)
+		var best_evasion_val: int = -INF_SCORE
+		for mv in evasions:
+			var undo := state.push_search_move(mv)
+			var score := -_quiescence(
+				state,
+				-beta,
+				-alpha,
+				state.current_turn,
+				q_depth,
+				ply + 1,
+				check_extensions_left - 1
+			)
+			state.pop_search_move(undo)
+
+			if score > best_evasion_val:
+				best_evasion_val = score
+			if score > alpha:
+				alpha = score
+			if alpha >= beta:
+				break
+
+		return best_evasion_val
+
+	if state.pieces.size() <= ENDGAME_STALEMATE_CHECK_MAX_PIECES and not state.has_any_legal_move(perspective_team):
+		return evaluate_stalemate(perspective_team, perspective_team)
+
 	var stand_pat := evaluate_board(state, perspective_team)
 	if stand_pat >= beta:
-		return beta
+		return stand_pat
 	if stand_pat > alpha:
 		alpha = stand_pat
 	if q_depth <= 0:
@@ -293,17 +352,28 @@ func _quiescence(
 
 	_order_moves(state, tactical_moves)
 
+	var best_val: int = stand_pat
 	for mv in tactical_moves:
 		var undo := state.push_search_move(mv)
-		var score := -_quiescence(state, -beta, -alpha, state.current_turn, q_depth - 1)
+		var score := -_quiescence(
+			state,
+			-beta,
+			-alpha,
+			state.current_turn,
+			q_depth - 1,
+			ply + 1,
+			check_extensions_left
+		)
 		state.pop_search_move(undo)
 
-		if score >= beta:
-			return beta
+		if score > best_val:
+			best_val = score
 		if score > alpha:
 			alpha = score
+		if alpha >= beta:
+			break
 
-	return alpha
+	return best_val
 
 
 ## Static evaluation of `state` from `perspective_team`'s point of view (in centipawns).
@@ -397,19 +467,20 @@ static func _steps_to_promotion(team: PieceData.Team, pos: Vector2i) -> int:
 
 func _expand_promotions(
 	moves: Array[GameRules.VectorMove],
-	include_underpromotions: bool = true
+	include_all_underpromotions: bool = true
 ) -> Array[GameRules.VectorMove]:
+	var promo_types: Array[PieceData.Type] = (
+		ROOT_PROMOTION_TYPES if include_all_underpromotions else SEARCH_PROMOTION_TYPES
+	)
 	var expanded: Array[GameRules.VectorMove] = []
 	for mv in moves:
 		if not mv.is_promotion:
 			expanded.append(mv)
 		else:
-			mv.promotion_type = PieceData.Type.QUEEN
-			expanded.append(mv)
-			if include_underpromotions:
-				var k_mv := mv.duplicate_move()
-				k_mv.promotion_type = PieceData.Type.KNIGHT
-				expanded.append(k_mv)
+			for ptype in promo_types:
+				var promo_mv := mv.duplicate_move()
+				promo_mv.promotion_type = ptype
+				expanded.append(promo_mv)
 	return expanded
 
 
@@ -425,8 +496,11 @@ func _order_moves(state: GameRules, moves: Array[GameRules.VectorMove]) -> void:
 			var victim := state.get_piece_by_id(mv.captured_piece_id)
 			var attacker := state.get_piece_by_id(mv.piece_id)
 			var v_val: int = PIECE_VALUES.get(victim.type, 100) if victim != null else 100
-			var a_val: int = PIECE_VALUES.get(attacker.type, 100) if attacker != null else 100
-			# MVV-LVA: prioritize high-value captures with low-value attackers
+			var a_val: int = (
+				1000 if attacker != null and attacker.type == PieceData.Type.KING
+				else (PIECE_VALUES.get(attacker.type, 100) if attacker != null else 100)
+			)
+			# MVV-LVA: prioritize high-value captures with low-value attackers (King captures stay above quiet moves)
 			s += 10000 + v_val * 10 - a_val
 		if mv.is_promotion:
 			s += 8000 + int(PIECE_VALUES.get(mv.promotion_type, 950))
