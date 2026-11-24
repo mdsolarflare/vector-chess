@@ -2888,6 +2888,10 @@ func _test_ui_layout_non_overlap_and_resource_isolation() -> void:
 		main_a.gpu_warning_banner.get_index() < main_a.new_game_modal.get_index(),
 		"GpuWarningBanner precedes NewGameModal in Main scene tree so startup modal is never occluded"
 	)
+	_assert(
+		main_a.issues_button != null and main_a.issues_button.get_index() < main_a.new_game_modal.get_index(),
+		"IssuesButton precedes NewGameModal in Main scene tree so startup modal is never occluded"
+	)
 
 	# 4. Non-overlapping rects across Narrow Portrait, Mobile Portrait, Desktop Portrait, Compact/Mobile Landscape, and Desktop Landscape
 	#    Uses longest realistic subtitle, long unbroken adapter string, and checks PromotionBox + SidePanel toggle states.
@@ -2924,6 +2928,7 @@ func _test_ui_layout_non_overlap_and_resource_isolation() -> void:
 		await process_frame
 
 		var toggle_rect: Rect2 = main_a.toggle_panel_button.get_global_rect()
+		var issues_rect: Rect2 = main_a.issues_button.get_global_rect()
 		var banner_rect: Rect2 = main_a.gpu_warning_banner.get_global_rect()
 		var side_rect: Rect2 = main_a.side_panel.get_global_rect()
 		var subtitle_rect: Rect2 = main_a.subtitle_label.get_global_rect()
@@ -2949,10 +2954,13 @@ func _test_ui_layout_non_overlap_and_resource_isolation() -> void:
 			and main_a.gpu_warning_label.autowrap_mode == TextServer.AUTOWRAP_WORD_SMART
 			and not banner_rect.intersects(toggle_rect)
 			and banner_rect.end.x < toggle_rect.position.x
+			and not banner_rect.intersects(issues_rect)
+			and issues_rect.end.x < banner_rect.position.x
 			and banner_clears_side,
-			"%s: GpuWarningBanner (%s) clears TogglePanelButton (%s) and SidePanel in landscape" % [
+			"%s: GpuWarningBanner (%s) clears IssuesButton (%s), TogglePanelButton (%s), and SidePanel in landscape" % [
 				vp_name,
 				str(banner_rect),
+				str(issues_rect),
 				str(toggle_rect),
 			]
 		)
