@@ -79,6 +79,20 @@ static func evaluate_stalemate(
 	return -STALEMATE_BONUS if perspective_team == stalemated_team else STALEMATE_BONUS
 
 
+## Returns true if the search node at `ply` should be evaluated as a 0 draw (insufficient material,
+## 50-move rule, threefold repetition at any ply, or 2-fold repetition at ply >= 2 so winning AI
+## breaks shuffling loops while losing AI cannot hallucinate non-forced 2-fold draws at ply 1).
+static func _is_search_draw(state: GameRules, ply: int) -> bool:
+	if state.is_insufficient_material() or state.is_fifty_move_draw():
+		return true
+	var rep_count := state.get_repetition_count()
+	if rep_count >= GameRules.THREEFOLD_REPETITION_COUNT:
+		return true
+	if ply >= 2 and rep_count >= 2:
+		return true
+	return false
+
+
 ## Chooses the best legal move for `ai_team` on a cloned `GameRules` state.
 func choose_move(source_rules: GameRules, ai_team: PieceData.Team, difficulty: Difficulty) -> GameRules.VectorMove:
 	var state := source_rules.clone_state()
@@ -157,6 +171,8 @@ func _choose_easy_move(
 				score = MATE_SCORE
 			else:
 				score = evaluate_stalemate(ai_team, enemy_team)
+		elif _is_search_draw(state, 1):
+			score = 0
 		else:
 			score = evaluate_board(state, ai_team)
 			# Add generous noise so Novice plays casually and makes human-like tactical oversights
@@ -246,6 +262,14 @@ func _negamax(
 	ply: int,
 	use_quiescence: bool
 ) -> int:
+	# Evaluate draw conditions before expanding the subtree, preserving checkmate/stalemate precedence
+	if _is_search_draw(state, ply):
+		if not state.has_any_legal_move(perspective_team):
+			if state.is_king_in_check(perspective_team):
+				return -(MATE_SCORE - ply * 10)
+			return evaluate_stalemate(perspective_team, perspective_team)
+		return 0
+
 	# Cut off at depth-0 leaf nodes BEFORE generating all legal moves (except checks and low-piece endgames)
 	if depth <= 0:
 		if use_quiescence:
@@ -300,6 +324,13 @@ func _quiescence(
 	ply: int,
 	check_extensions_left: int = MAX_Q_CHECK_EXTENSIONS
 ) -> int:
+	if _is_search_draw(state, ply):
+		if not state.has_any_legal_move(perspective_team):
+			if state.is_king_in_check(perspective_team):
+				return -(MATE_SCORE - ply * 10)
+			return evaluate_stalemate(perspective_team, perspective_team)
+		return 0
+
 	if state.is_king_in_check(perspective_team):
 		if check_extensions_left <= 0:
 			if not state.has_any_legal_move(perspective_team):
