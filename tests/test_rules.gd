@@ -36,6 +36,7 @@ func _run_all_tests() -> void:
 	_test_ai_player_move_selection()
 	await _test_ai_player_async_move_selection()
 	await _test_ai_player_tactical_correctness_and_search()
+	await _test_draw_rules_and_ai_repetition_avoidance()
 	_test_software_renderer_detection()
 	_test_vector_board_caching_and_idle_redraw()
 	await _test_vector_board_atlas_and_aa_isolation()
@@ -3021,3 +3022,987 @@ func _test_ui_layout_non_overlap_and_resource_isolation() -> void:
 	)
 
 	main_a.free()
+
+
+func _find_legal_move(rules: GameRules, from_alg: String, to_alg: String) -> GameRules.VectorMove:
+	var from_hex := GameRules.algebraic_to_axial(from_alg)
+	var to_hex := GameRules.algebraic_to_axial(to_alg)
+	var piece := rules.get_piece_at(from_hex)
+	if piece == null:
+		return null
+	for mv in rules.get_legal_moves_for_piece(piece):
+		if mv.to == to_hex:
+			return mv
+	return null
+
+
+func _test_draw_rules_and_ai_repetition_avoidance() -> void:
+	print("\n-- Draw Rules & AI Repetition Avoidance (Issue #32) --")
+
+	# ------------------------------------------------------------------
+	# 1. Conservative insufficient-material detection (Glinski 3-shade hex board)
+	# ------------------------------------------------------------------
+	# Exact Issue #32 repro using pieces.clear() directly
+	var kk_repro := GameRules.new()
+	kk_repro.pieces.clear()
+	kk_repro._spawn_piece(PieceData.Team.CYAN, PieceData.Type.KING, GameRules.algebraic_to_axial("g1"))
+	kk_repro._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.KING, GameRules.algebraic_to_axial("g10"))
+	kk_repro._update_game_status()
+	_assert(
+		kk_repro.is_insufficient_material()
+		and kk_repro.is_game_over
+		and kk_repro.status_text == "DRAW - Insufficient Material",
+		"#32: Bare K vs K (pieces.clear() repro) triggers DRAW - Insufficient Material"
+	)
+
+	# K+B vs K -> insufficient
+	var kb_k := GameRules.new()
+	kb_k.clear_pieces()
+	kb_k._spawn_piece(PieceData.Team.CYAN, PieceData.Type.KING, GameRules.algebraic_to_axial("g1"))
+	kb_k._spawn_piece(PieceData.Team.CYAN, PieceData.Type.BISHOP, GameRules.algebraic_to_axial("f1"))
+	kb_k._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.KING, GameRules.algebraic_to_axial("g10"))
+	kb_k._update_game_status()
+	_assert(
+		kb_k.is_insufficient_material()
+		and kb_k.is_game_over
+		and kb_k.status_text == "DRAW - Insufficient Material",
+		"#32: K+B vs K triggers DRAW - Insufficient Material"
+	)
+
+	# K+N vs K -> insufficient
+	var kn_k := GameRules.new()
+	kn_k.clear_pieces()
+	kn_k._spawn_piece(PieceData.Team.CYAN, PieceData.Type.KING, GameRules.algebraic_to_axial("g1"))
+	kn_k._spawn_piece(PieceData.Team.CYAN, PieceData.Type.KNIGHT, GameRules.algebraic_to_axial("d1"))
+	kn_k._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.KING, GameRules.algebraic_to_axial("g10"))
+	kn_k._update_game_status()
+	_assert(
+		kn_k.is_insufficient_material()
+		and kn_k.is_game_over
+		and kn_k.status_text == "DRAW - Insufficient Material",
+		"#32: K+N vs K triggers DRAW - Insufficient Material"
+	)
+
+	# K+B vs K+B on the same hex shade -> insufficient
+	var kb_kb_same := GameRules.new()
+	kb_kb_same.clear_pieces()
+	var shade_f1 := GameRules.get_cell_color_index(GameRules.algebraic_to_axial("f1"))
+	var shade_f4 := GameRules.get_cell_color_index(GameRules.algebraic_to_axial("f4"))
+	kb_kb_same._spawn_piece(PieceData.Team.CYAN, PieceData.Type.KING, GameRules.algebraic_to_axial("g1"))
+	kb_kb_same._spawn_piece(PieceData.Team.CYAN, PieceData.Type.BISHOP, GameRules.algebraic_to_axial("f1"))
+	kb_kb_same._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.KING, GameRules.algebraic_to_axial("g10"))
+	kb_kb_same._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.BISHOP, GameRules.algebraic_to_axial("f4"))
+	kb_kb_same._update_game_status()
+	_assert(
+		shade_f1 == shade_f4
+		and kb_kb_same.is_insufficient_material()
+		and kb_kb_same.is_game_over
+		and kb_kb_same.status_text == "DRAW - Insufficient Material",
+		"#32: Same-shade K+B vs K+B triggers DRAW - Insufficient Material"
+	)
+
+	# K+B vs K+B on different hex shades -> NOT auto-draw
+	var kb_kb_diff := GameRules.new()
+	kb_kb_diff.clear_pieces()
+	var shade_f2 := GameRules.get_cell_color_index(GameRules.algebraic_to_axial("f2"))
+	kb_kb_diff._spawn_piece(PieceData.Team.CYAN, PieceData.Type.KING, GameRules.algebraic_to_axial("g1"))
+	kb_kb_diff._spawn_piece(PieceData.Team.CYAN, PieceData.Type.BISHOP, GameRules.algebraic_to_axial("f1"))
+	kb_kb_diff._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.KING, GameRules.algebraic_to_axial("g10"))
+	kb_kb_diff._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.BISHOP, GameRules.algebraic_to_axial("f2"))
+	kb_kb_diff._update_game_status()
+	_assert(
+		shade_f1 != shade_f2
+		and not kb_kb_diff.is_insufficient_material()
+		and not kb_kb_diff.is_game_over,
+		"#32: Different-shade K+B vs K+B does NOT auto-draw"
+	)
+
+	# K+2B vs K -> NOT auto-draw
+	var k2b_k := GameRules.new()
+	k2b_k.clear_pieces()
+	k2b_k._spawn_piece(PieceData.Team.CYAN, PieceData.Type.KING, GameRules.algebraic_to_axial("g1"))
+	k2b_k._spawn_piece(PieceData.Team.CYAN, PieceData.Type.BISHOP, GameRules.algebraic_to_axial("f1"))
+	k2b_k._spawn_piece(PieceData.Team.CYAN, PieceData.Type.BISHOP, GameRules.algebraic_to_axial("f2"))
+	k2b_k._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.KING, GameRules.algebraic_to_axial("g10"))
+	k2b_k._update_game_status()
+	_assert(
+		not k2b_k.is_insufficient_material() and not k2b_k.is_game_over,
+		"#32: K+2B vs K does NOT auto-draw"
+	)
+
+	# K+B+N vs K -> NOT auto-draw
+	var kbn_k := GameRules.new()
+	kbn_k.clear_pieces()
+	kbn_k._spawn_piece(PieceData.Team.CYAN, PieceData.Type.KING, GameRules.algebraic_to_axial("g1"))
+	kbn_k._spawn_piece(PieceData.Team.CYAN, PieceData.Type.BISHOP, GameRules.algebraic_to_axial("f1"))
+	kbn_k._spawn_piece(PieceData.Team.CYAN, PieceData.Type.KNIGHT, GameRules.algebraic_to_axial("d1"))
+	kbn_k._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.KING, GameRules.algebraic_to_axial("g10"))
+	kbn_k._update_game_status()
+	_assert(
+		not kbn_k.is_insufficient_material() and not kbn_k.is_game_over,
+		"#32: K+B+N vs K does NOT auto-draw"
+	)
+
+	# Capture into K vs K triggers insufficient-material draw; undo cleanly rolls back
+	# f5 -> e6 is a diagonal King capture; Rook on e6 does not check f5.
+	var cap_insuff := GameRules.new()
+	cap_insuff.clear_pieces()
+	cap_insuff._spawn_piece(PieceData.Team.CYAN, PieceData.Type.KING, GameRules.algebraic_to_axial("f5"))
+	cap_insuff._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.ROOK, GameRules.algebraic_to_axial("e6"))
+	cap_insuff._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.KING, GameRules.algebraic_to_axial("a6"))
+	cap_insuff.current_turn = PieceData.Team.CYAN
+	cap_insuff._update_game_status()
+	var cap_mv := _find_legal_move(cap_insuff, "f5", "e6")
+	var cap_ok := cap_mv != null and cap_insuff.execute_move(cap_mv)
+	var cap_drew := cap_insuff.is_game_over and cap_insuff.status_text == "DRAW - Insufficient Material"
+	var cap_undo_ok := cap_insuff.undo_last_move()
+	_assert(
+		cap_ok
+		and cap_drew
+		and cap_undo_ok
+		and not cap_insuff.is_game_over
+		and cap_insuff.status_text == "Cyan's Turn"
+		and cap_insuff.pieces.size() == 3,
+		"#32: Capturing last Rook into K vs K draws immediately and undo_last_move() restores live game"
+	)
+
+	# Stalemate takes precedence over insufficient material (Glinski 0.75 : 0.25)
+	var stale_over_insuff := GameRules.new()
+	stale_over_insuff.clear_pieces()
+	stale_over_insuff._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.KING, GameRules.algebraic_to_axial("a6"))
+	stale_over_insuff._spawn_piece(PieceData.Team.CYAN, PieceData.Type.KING, GameRules.algebraic_to_axial("c5"))
+	stale_over_insuff.current_turn = PieceData.Team.CYAN
+	var stale_mv := _find_legal_move(stale_over_insuff, "c5", "c6")
+	var stale_exec := stale_mv != null and stale_over_insuff.execute_move(stale_mv)
+	_assert(
+		stale_exec
+		and stale_over_insuff.is_game_over
+		and stale_over_insuff.status_text == "STALEMATE - Cyan 0.75 : 0.25 Magenta",
+		"#32: Glinski stalemate (0.75 : 0.25) takes precedence over insufficient material"
+	)
+
+	# ------------------------------------------------------------------
+	# 2. Zobrist position key (turn sensitivity & legal en-passant nuance)
+	# ------------------------------------------------------------------
+	var key_rules := GameRules.new()
+	var key_cyan := key_rules.get_position_key()
+	key_rules.current_turn = PieceData.Team.MAGENTA
+	var key_magenta := key_rules.get_position_key()
+	_assert(
+		key_cyan != key_magenta,
+		"#32: Zobrist position key distinguishes side-to-move (Cyan vs Magenta)"
+	)
+
+	# 2a: Double-step with NO enemy pawn able to capture en passant -> same key as no-EP
+	var ep_no_cap := GameRules.new()
+	ep_no_cap.clear_pieces()
+	ep_no_cap._spawn_piece(PieceData.Team.CYAN, PieceData.Type.KING, GameRules.algebraic_to_axial("g1"))
+	ep_no_cap._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.KING, GameRules.algebraic_to_axial("g10"))
+	ep_no_cap._spawn_piece(PieceData.Team.CYAN, PieceData.Type.PAWN, GameRules.algebraic_to_axial("e4"))
+	ep_no_cap.current_turn = PieceData.Team.CYAN
+	var ep_ds_mv := _find_legal_move(ep_no_cap, "e4", "e6")
+	var ep_ds_ok := ep_ds_mv != null and ep_ds_mv.is_double_step and ep_no_cap.execute_move(ep_ds_mv)
+	var key_with_unused_ep := ep_no_cap.get_position_key()
+	var ep_no_cap_ref := ep_no_cap.clone_state()
+	ep_no_cap_ref.en_passant_target = GameRules.INVALID_HEX
+	ep_no_cap_ref.en_passant_pawn_id = -1
+	_assert(
+		ep_ds_ok
+		and ep_no_cap.en_passant_target == GameRules.algebraic_to_axial("e5")
+		and key_with_unused_ep == ep_no_cap_ref.get_position_key(),
+		"#32: Position key ignores en_passant_target when no opposing pawn can capture en passant"
+	)
+
+	# 2b: Double-step WITH legal enemy en-passant capturer -> distinct key
+	var ep_legal := GameRules.new()
+	ep_legal.clear_pieces()
+	ep_legal._spawn_piece(PieceData.Team.CYAN, PieceData.Type.KING, GameRules.algebraic_to_axial("g1"))
+	ep_legal._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.KING, GameRules.algebraic_to_axial("g10"))
+	ep_legal._spawn_piece(PieceData.Team.CYAN, PieceData.Type.PAWN, GameRules.algebraic_to_axial("e4"))
+	ep_legal._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.PAWN, GameRules.algebraic_to_axial("f6"))
+	ep_legal.current_turn = PieceData.Team.CYAN
+	var ep_legal_mv := _find_legal_move(ep_legal, "e4", "e6")
+	var ep_legal_ok := ep_legal_mv != null and ep_legal.execute_move(ep_legal_mv)
+	var key_with_legal_ep := ep_legal.get_position_key()
+	var ep_legal_ref := ep_legal.clone_state()
+	ep_legal_ref.en_passant_target = GameRules.INVALID_HEX
+	ep_legal_ref.en_passant_pawn_id = -1
+	_assert(
+		ep_legal_ok and key_with_legal_ep != ep_legal_ref.get_position_key(),
+		"#32: Position key includes en_passant_target when an opposing pawn can legally capture en passant"
+	)
+
+	# 2c: Double-step where opposing pawn is pinned to its King -> ignored in position key
+	var ep_pinned := GameRules.new()
+	ep_pinned.clear_pieces()
+	ep_pinned._spawn_piece(PieceData.Team.CYAN, PieceData.Type.KING, GameRules.algebraic_to_axial("g1"))
+	ep_pinned._spawn_piece(PieceData.Team.CYAN, PieceData.Type.ROOK, GameRules.algebraic_to_axial("f1"))
+	ep_pinned._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.KING, GameRules.algebraic_to_axial("f11"))
+	ep_pinned._spawn_piece(PieceData.Team.CYAN, PieceData.Type.PAWN, GameRules.algebraic_to_axial("e4"))
+	ep_pinned._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.PAWN, GameRules.algebraic_to_axial("f6"))
+	ep_pinned.current_turn = PieceData.Team.CYAN
+	var ep_pinned_mv := _find_legal_move(ep_pinned, "e4", "e6")
+	var ep_pinned_ok := ep_pinned_mv != null and ep_pinned.execute_move(ep_pinned_mv)
+	var key_with_pinned_ep := ep_pinned.get_position_key()
+	var ep_pinned_ref := ep_pinned.clone_state()
+	ep_pinned_ref.en_passant_target = GameRules.INVALID_HEX
+	ep_pinned_ref.en_passant_pawn_id = -1
+	_assert(
+		ep_pinned_ok and key_with_pinned_ep == ep_pinned_ref.get_position_key(),
+		"#32: Position key ignores en_passant_target when the only candidate capturer is pinned to its King"
+	)
+
+	# ------------------------------------------------------------------
+	# 3. Threefold repetition & undo rollback
+	# ------------------------------------------------------------------
+	var rep_rules := GameRules.new()
+	_assert(
+		rep_rules.get_repetition_count() == 1 and not rep_rules.is_threefold_repetition(),
+		"#32: Fresh game starts with repetition count 1"
+	)
+	var rep_seq := [
+		["d1", "c3"], ["d9", "f8"], ["c3", "d1"], ["f8", "d9"],
+		["d1", "c3"], ["d9", "f8"], ["c3", "d1"], ["f8", "d9"],
+	]
+	var rep_seq_ok := true
+	var count_after_4 := -1
+	var game_over_after_4 := true
+	for i in range(rep_seq.size()):
+		var mv := _find_legal_move(rep_rules, rep_seq[i][0], rep_seq[i][1])
+		if mv == null or not rep_rules.execute_move(mv):
+			rep_seq_ok = false
+			break
+		if i == 3:
+			count_after_4 = rep_rules.get_repetition_count()
+			game_over_after_4 = rep_rules.is_game_over
+	_assert(
+		rep_seq_ok
+		and count_after_4 == 2
+		and not game_over_after_4
+		and rep_rules.get_repetition_count() == 3
+		and rep_rules.is_threefold_repetition()
+		and rep_rules.is_game_over
+		and rep_rules.status_text == "DRAW - Threefold Repetition",
+		"#32: Twofold repetition continues play; threefold repetition triggers DRAW - Threefold Repetition"
+	)
+
+	var rep_undo1 := rep_rules.undo_last_move()
+	var after_undo1_ok := (
+		rep_undo1
+		and not rep_rules.is_game_over
+		and not rep_rules.is_threefold_repetition()
+		and rep_rules.status_text == "Magenta's Turn"
+		and rep_rules.halfmove_clock == 7
+	)
+	var replay_mv := _find_legal_move(rep_rules, "f8", "d9")
+	var replay_ok := replay_mv != null and rep_rules.execute_move(replay_mv)
+	var replay_drew := rep_rules.is_game_over and rep_rules.status_text == "DRAW - Threefold Repetition"
+	while rep_rules.undo_last_move():
+		pass
+	_assert(
+		after_undo1_ok
+		and replay_ok
+		and replay_drew
+		and rep_rules.move_history.is_empty()
+		and rep_rules._position_history.size() == 1
+		and rep_rules.get_repetition_count() == 1
+		and rep_rules.halfmove_clock == 0,
+		"#32: Threefold repetition undo rolls back cleanly, re-triggers on replay, and full undo restores count=1"
+	)
+
+	# ------------------------------------------------------------------
+	# 4. 50-move rule, clock resets, undo rollback & checkmate precedence
+	# ------------------------------------------------------------------
+	var clock_rules := GameRules.new()
+	var c_mv1 := _find_legal_move(clock_rules, "d1", "c3")
+	var c_ok1 := c_mv1 != null and clock_rules.execute_move(c_mv1)
+	var clock_after_quiet := clock_rules.halfmove_clock
+	var c_mv2 := _find_legal_move(clock_rules, "f7", "f6")
+	var c_ok2 := c_mv2 != null and clock_rules.execute_move(c_mv2)
+	var clock_after_pawn := clock_rules.halfmove_clock
+	var c_undo_pawn := clock_rules.undo_last_move()
+	var clock_after_undo_pawn := clock_rules.halfmove_clock
+	_assert(
+		c_ok1 and c_ok2 and c_undo_pawn
+		and clock_after_quiet == 1
+		and clock_after_pawn == 0
+		and clock_after_undo_pawn == 1,
+		"#32: halfmove_clock increments on quiet move, resets to 0 on pawn move, and restores on undo"
+	)
+
+	# Capture resets halfmove_clock and undo restores prior value
+	var cap_clock := GameRules.new()
+	cap_clock.clear_pieces()
+	cap_clock._spawn_piece(PieceData.Team.CYAN, PieceData.Type.KING, GameRules.algebraic_to_axial("g1"))
+	cap_clock._spawn_piece(PieceData.Team.CYAN, PieceData.Type.ROOK, GameRules.algebraic_to_axial("f4"))
+	cap_clock._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.ROOK, GameRules.algebraic_to_axial("f6"))
+	cap_clock._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.KING, GameRules.algebraic_to_axial("g10"))
+	cap_clock.current_turn = PieceData.Team.CYAN
+	cap_clock.halfmove_clock = 42
+	var cap_clk_mv := _find_legal_move(cap_clock, "f4", "f6")
+	var cap_clk_ok := cap_clk_mv != null and cap_clock.execute_move(cap_clk_mv)
+	var cap_clk_zero := cap_clock.halfmove_clock == 0
+	var cap_clk_undo := cap_clock.undo_last_move()
+	_assert(
+		cap_clk_ok and cap_clk_zero and cap_clk_undo and cap_clock.halfmove_clock == 42,
+		"#32: Capture resets halfmove_clock to 0 and undo restores previous clock (42)"
+	)
+
+	# halfmove_clock == 99 + quiet move -> DRAW - 50-Move Rule, undo restores 99
+	var fifty_rules := GameRules.new()
+	fifty_rules.clear_pieces()
+	fifty_rules._spawn_piece(PieceData.Team.CYAN, PieceData.Type.KING, GameRules.algebraic_to_axial("g1"))
+	fifty_rules._spawn_piece(PieceData.Team.CYAN, PieceData.Type.ROOK, GameRules.algebraic_to_axial("c1"))
+	fifty_rules._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.KING, GameRules.algebraic_to_axial("g10"))
+	fifty_rules.current_turn = PieceData.Team.CYAN
+	fifty_rules.halfmove_clock = 99
+	fifty_rules._update_game_status()
+	var pre_fifty_live := not fifty_rules.is_game_over and not fifty_rules.is_fifty_move_draw()
+	var fifty_mv := _find_legal_move(fifty_rules, "c1", "c2")
+	var fifty_exec := fifty_mv != null and fifty_rules.execute_move(fifty_mv)
+	var fifty_drew := (
+		fifty_rules.halfmove_clock == 100
+		and fifty_rules.is_fifty_move_draw()
+		and fifty_rules.is_game_over
+		and fifty_rules.status_text == "DRAW - 50-Move Rule"
+	)
+	var fifty_undo := fifty_rules.undo_last_move()
+	_assert(
+		pre_fifty_live
+		and fifty_exec
+		and fifty_drew
+		and fifty_undo
+		and fifty_rules.halfmove_clock == 99
+		and not fifty_rules.is_game_over
+		and fifty_rules.status_text == "Cyan's Turn",
+		"#32: 100th half-move triggers DRAW - 50-Move Rule and undo_last_move() restores halfmove_clock=99"
+	)
+
+	# Checkmate on halfmove 100 takes precedence over 50-move draw
+	var mate100 := GameRules.new()
+	mate100.clear_pieces()
+	mate100._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.KING, GameRules.algebraic_to_axial("a6"))
+	mate100._spawn_piece(PieceData.Team.CYAN, PieceData.Type.KING, GameRules.algebraic_to_axial("d7"))
+	mate100._spawn_piece(PieceData.Team.CYAN, PieceData.Type.ROOK, GameRules.algebraic_to_axial("b1"))
+	mate100._spawn_piece(PieceData.Team.CYAN, PieceData.Type.ROOK, GameRules.algebraic_to_axial("d3"))
+	mate100.current_turn = PieceData.Team.CYAN
+	mate100.halfmove_clock = 99
+	var mate100_mv := _find_legal_move(mate100, "d3", "a3")
+	var mate100_ok := mate100_mv != null and mate100.execute_move(mate100_mv)
+	_assert(
+		mate100_ok
+		and mate100.halfmove_clock == 100
+		and mate100.is_game_over
+		and mate100.status_text == "CHECKMATE - Cyan Wins!",
+		"#32: Checkmate on halfmove 100 takes precedence over 50-move draw"
+	)
+
+	# ------------------------------------------------------------------
+	# 5. State sync across clone_state(), push/pop_search_move(), reset_game()
+	# ------------------------------------------------------------------
+	var sync_rules := GameRules.new()
+	var sync_m1 := _find_legal_move(sync_rules, "d1", "c3")
+	var sync_m2 := _find_legal_move(sync_rules, "d9", "f8")
+	var sync_setup_ok := (
+		sync_m1 != null and sync_rules.execute_move(sync_m1)
+		and sync_m2 != null and sync_rules.execute_move(sync_m2)
+	)
+	var sync_clone := sync_rules.clone_state()
+	var clone_matches := (
+		sync_setup_ok
+		and sync_clone.halfmove_clock == sync_rules.halfmove_clock
+		and sync_clone.get_position_key() == sync_rules.get_position_key()
+		and sync_clone.get_repetition_count() == sync_rules.get_repetition_count()
+		and sync_clone._position_history == sync_rules._position_history
+	)
+	var pre_push_key := sync_clone.get_position_key()
+	var pre_push_clock := sync_clone.halfmove_clock
+	var pre_push_hist := sync_clone._position_history.duplicate()
+	var push_mv := _find_legal_move(sync_clone, "c3", "d1")
+	var undo_rec := sync_clone.push_search_move(push_mv)
+	var mid_push_ok := (
+		sync_clone.halfmove_clock == pre_push_clock + 1
+		and sync_clone._position_history.size() == pre_push_hist.size() + 1
+		and sync_clone.get_position_key() != pre_push_key
+	)
+	sync_clone.pop_search_move(undo_rec)
+	var post_pop_ok := (
+		sync_clone.halfmove_clock == pre_push_clock
+		and sync_clone.get_position_key() == pre_push_key
+		and sync_clone._position_history == pre_push_hist
+		and sync_rules.halfmove_clock == 2
+		and sync_rules._position_history.size() == 3
+	)
+	sync_rules.reset_game()
+	var post_reset_ok := (
+		sync_rules.halfmove_clock == 0
+		and sync_rules._position_history.size() == 1
+		and sync_rules.get_repetition_count() == 1
+		and not sync_rules.is_game_over
+	)
+	_assert(
+		clone_matches and mid_push_ok and post_pop_ok and post_reset_ok,
+		"#32: clone_state(), push/pop_search_move(), and reset_game() keep halfmove_clock and Zobrist history synchronized"
+	)
+
+	# ------------------------------------------------------------------
+	# 6. AI repetition avoidance & draw seeking
+	# ------------------------------------------------------------------
+	var ai := AIPlayer.new()
+
+	# 6a: Winning AI avoids both 2-fold shuffling loops and immediate 3-fold draws
+	var win_rep := GameRules.new()
+	win_rep.clear_pieces()
+	win_rep._spawn_piece(PieceData.Team.CYAN, PieceData.Type.KING, GameRules.algebraic_to_axial("a1"))
+	win_rep._spawn_piece(PieceData.Team.CYAN, PieceData.Type.QUEEN, GameRules.algebraic_to_axial("f6"))
+	win_rep._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.KING, GameRules.algebraic_to_axial("l4"))
+	win_rep.current_turn = PieceData.Team.MAGENTA
+	var f6_hex := GameRules.algebraic_to_axial("f6")
+
+	# Play 3 half-moves so Cyan moving Q f5->f6 triggers 2-fold (and Magenta l4->l3 triggers ply-2 draw)
+	var win_setup_2fold := [["l4", "l3"], ["f6", "f5"], ["l3", "l4"]]
+	var win_2fold_setup_ok := true
+	for step in win_setup_2fold:
+		var step_mv := _find_legal_move(win_rep, step[0], step[1])
+		if step_mv == null or not win_rep.execute_move(step_mv):
+			win_2fold_setup_ok = false
+			break
+
+	var win_avoids_2fold := win_2fold_setup_ok
+	for seed_val in range(1, 11):
+		ai._rng.seed = seed_val
+		var m_mv := ai.choose_move(win_rep, PieceData.Team.CYAN, AIPlayer.Difficulty.MEDIUM)
+		if m_mv == null or m_mv.to == f6_hex:
+			win_avoids_2fold = false
+			break
+	ai._rng.seed = 7
+	var win_h2 := ai.choose_move(win_rep, PieceData.Team.CYAN, AIPlayer.Difficulty.HARD)
+	ai._rng.seed = 7
+	var win_h2_async := await ai.choose_move_async(win_rep, PieceData.Team.CYAN, AIPlayer.Difficulty.HARD, self)
+	_assert(
+		win_avoids_2fold
+		and win_h2 != null and win_h2.to != f6_hex
+		and win_h2_async != null and win_h2_async.to != f6_hex,
+		"#32: Winning AI breaks 2-fold shuffling loop (avoids Q f5->f6) on Medium (10 seeds) & Hard (sync/async)"
+	)
+
+	# Complete 1 more cycle so Q f5->f6 is an IMMEDIATE 3-fold repetition
+	var win_setup_3fold := [["f5", "f6"], ["l4", "l3"], ["f6", "f5"], ["l3", "l4"]]
+	var win_3fold_setup_ok := true
+	for step in win_setup_3fold:
+		var step_mv := _find_legal_move(win_rep, step[0], step[1])
+		if step_mv == null or not win_rep.execute_move(step_mv):
+			win_3fold_setup_ok = false
+			break
+	var win_3fold_check := win_rep.clone_state()
+	var win_3fold_mv := _find_legal_move(win_3fold_check, "f5", "f6")
+	var win_avoids_3fold := (
+		win_3fold_setup_ok
+		and win_3fold_mv != null
+		and win_3fold_check.execute_move(win_3fold_mv)
+		and win_3fold_check.is_game_over
+		and win_3fold_check.status_text == "DRAW - Threefold Repetition"
+	)
+	for seed_val in range(1, 11):
+		ai._rng.seed = seed_val
+		var m_mv := ai.choose_move(win_rep, PieceData.Team.CYAN, AIPlayer.Difficulty.MEDIUM)
+		if m_mv == null or m_mv.to == f6_hex:
+			win_avoids_3fold = false
+			break
+	ai._rng.seed = 9
+	var win_h3 := ai.choose_move(win_rep, PieceData.Team.CYAN, AIPlayer.Difficulty.HARD)
+	ai._rng.seed = 9
+	var win_h3_async := await ai.choose_move_async(win_rep, PieceData.Team.CYAN, AIPlayer.Difficulty.HARD, self)
+	_assert(
+		win_avoids_3fold
+		and win_h3 != null and win_h3.to != f6_hex
+		and win_h3_async != null and win_h3_async.to != f6_hex,
+		"#32: Winning AI avoids immediate 3-fold repetition Q f5->f6 on Medium (10 seeds) & Hard (sync/async)"
+	)
+
+	# 6b: Losing AI claims immediate threefold repetition (Easy, Medium, Hard 10 seeds + async)
+	var lose_rep := GameRules.new()
+	lose_rep.clear_pieces()
+	lose_rep._spawn_piece(PieceData.Team.CYAN, PieceData.Type.KING, GameRules.algebraic_to_axial("a1"))
+	lose_rep._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.KING, GameRules.algebraic_to_axial("l4"))
+	lose_rep._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.QUEEN, GameRules.algebraic_to_axial("f5"))
+	lose_rep._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.ROOK, GameRules.algebraic_to_axial("l1"))
+	lose_rep.current_turn = PieceData.Team.MAGENTA
+	var a1_hex := GameRules.algebraic_to_axial("a1")
+	var lose_steps := [
+		["l4", "l3"], ["a1", "a2"], ["l3", "l4"], ["a2", "a1"],
+		["l4", "l3"], ["a1", "a2"], ["l3", "l4"],
+	]
+	var lose_setup_ok := true
+	for step in lose_steps:
+		var step_mv := _find_legal_move(lose_rep, step[0], step[1])
+		if step_mv == null or not lose_rep.execute_move(step_mv):
+			lose_setup_ok = false
+			break
+	var lose_claims_ok := lose_setup_ok and AIPlayer.evaluate_board(lose_rep, PieceData.Team.CYAN) < -1000
+	for seed_val in range(1, 11):
+		ai._rng.seed = seed_val
+		var le := ai.choose_move(lose_rep, PieceData.Team.CYAN, AIPlayer.Difficulty.EASY)
+		ai._rng.seed = seed_val
+		var lm := ai.choose_move(lose_rep, PieceData.Team.CYAN, AIPlayer.Difficulty.MEDIUM)
+		ai._rng.seed = seed_val
+		var lh := ai.choose_move(lose_rep, PieceData.Team.CYAN, AIPlayer.Difficulty.HARD)
+		if (
+			le == null or le.to != a1_hex
+			or lm == null or lm.to != a1_hex
+			or lh == null or lh.to != a1_hex
+		):
+			lose_claims_ok = false
+			break
+	ai._rng.seed = 4
+	var lh_async := await ai.choose_move_async(lose_rep, PieceData.Team.CYAN, AIPlayer.Difficulty.HARD, self)
+	_assert(
+		lose_claims_ok and lh_async != null and lh_async.to == a1_hex,
+		"#32: Losing AI claims immediate threefold repetition (K a2->a1) across Easy, Medium & Hard (10 seeds + async)"
+	)
+
+	# 6c: Losing AI must NOT treat a non-terminal 2-fold repetition at ply 1 as a draw when opponent has Mate-in-1
+	var mate_trap := GameRules.new()
+	mate_trap.clear_pieces()
+	mate_trap._spawn_piece(PieceData.Team.CYAN, PieceData.Type.KING, GameRules.algebraic_to_axial("a6"))
+	mate_trap._spawn_piece(PieceData.Team.CYAN, PieceData.Type.ROOK, GameRules.algebraic_to_axial("c2"))
+	mate_trap._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.KING, GameRules.algebraic_to_axial("d7"))
+	mate_trap._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.ROOK, GameRules.algebraic_to_axial("b1"))
+	mate_trap._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.ROOK, GameRules.algebraic_to_axial("d3"))
+	mate_trap._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.QUEEN, GameRules.algebraic_to_axial("i4"))
+	mate_trap.current_turn = PieceData.Team.MAGENTA
+	mate_trap.execute_move(_find_legal_move(mate_trap, "i4", "i5"))
+	mate_trap.execute_move(_find_legal_move(mate_trap, "c2", "c3"))
+	mate_trap.execute_move(_find_legal_move(mate_trap, "i5", "i4"))
+	var c2_hex := GameRules.algebraic_to_axial("c2")
+	# Confirm c3->c2 creates count==2 (not 3) and allows Magenta d3->a3# mate-in-1
+	var trap_verify := mate_trap.clone_state()
+	trap_verify.execute_move(_find_legal_move(trap_verify, "c3", "c2"))
+	var trap_rep2 := trap_verify.get_repetition_count() == 2 and not trap_verify.is_game_over
+	trap_verify.execute_move(_find_legal_move(trap_verify, "d3", "a3"))
+	var trap_mates := trap_verify.is_game_over and trap_verify.status_text == "CHECKMATE - Magenta Wins!"
+	ai._rng.seed = 12
+	var trap_med := ai.choose_move(mate_trap, PieceData.Team.CYAN, AIPlayer.Difficulty.MEDIUM)
+	ai._rng.seed = 12
+	var trap_hard := ai.choose_move(mate_trap, PieceData.Team.CYAN, AIPlayer.Difficulty.HARD)
+	_assert(
+		trap_rep2
+		and trap_mates
+		and trap_med != null and trap_med.to != c2_hex
+		and trap_hard != null and trap_hard.to != c2_hex,
+		"#32: Losing AI rejects non-terminal 2-fold move (R c3->c2) that walks into opponent Mate-in-1 (R d3->a3#)"
+	)
+
+	# 6d: Winning AI at halfmove_clock == 99 pushes pawn to reset 50-move clock instead of drawing
+	var clock_ai := GameRules.new()
+	clock_ai.clear_pieces()
+	clock_ai._spawn_piece(PieceData.Team.CYAN, PieceData.Type.KING, GameRules.algebraic_to_axial("g1"))
+	clock_ai._spawn_piece(PieceData.Team.CYAN, PieceData.Type.QUEEN, GameRules.algebraic_to_axial("e3"))
+	var clock_pawn := clock_ai._spawn_piece(PieceData.Team.CYAN, PieceData.Type.PAWN, GameRules.algebraic_to_axial("f6"))
+	clock_ai._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.KING, GameRules.algebraic_to_axial("g10"))
+	clock_ai.current_turn = PieceData.Team.CYAN
+	clock_ai.halfmove_clock = 99
+	var f7_push := GameRules.algebraic_to_axial("f7")
+	var clock_ai_ok := true
+	for seed_val in range(1, 11):
+		ai._rng.seed = seed_val
+		var cm := ai.choose_move(clock_ai, PieceData.Team.CYAN, AIPlayer.Difficulty.MEDIUM)
+		if cm == null or cm.piece_id != clock_pawn.id or cm.to != f7_push:
+			clock_ai_ok = false
+			break
+	ai._rng.seed = 5
+	var ch := ai.choose_move(clock_ai, PieceData.Team.CYAN, AIPlayer.Difficulty.HARD)
+	ai._rng.seed = 5
+	var ch_async := await ai.choose_move_async(clock_ai, PieceData.Team.CYAN, AIPlayer.Difficulty.HARD, self)
+	_assert(
+		clock_ai_ok
+		and ch != null and ch.piece_id == clock_pawn.id and ch.to == f7_push
+		and ch_async != null and ch_async.piece_id == clock_pawn.id and ch_async.to == f7_push,
+		"#32: Winning AI at halfmove_clock=99 pushes pawn f6->f7 to reset clock instead of drawing on 50-move rule"
+	)
+
+	# ------------------------------------------------------------------
+	# 6e. Critique edge cases: clear_pieces(), insufficient material, mid-search Zobrist, EP threefold & AI draws
+	# ------------------------------------------------------------------
+	# clear_pieces() resets move_history, is_game_over, last_move, status_text & get_repetition_count() parity
+	var clr_test := GameRules.new()
+	clr_test.clear_pieces()
+	clr_test._spawn_piece(PieceData.Team.CYAN, PieceData.Type.KING, GameRules.algebraic_to_axial("f5"))
+	clr_test._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.ROOK, GameRules.algebraic_to_axial("e6"))
+	clr_test._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.KING, GameRules.algebraic_to_axial("a6"))
+	clr_test.execute_move(_find_legal_move(clr_test, "f5", "e6"))
+	var clr_was_over := clr_test.is_game_over and clr_test.move_history.size() == 1
+	clr_test.clear_pieces()
+	var clr_reset_ok := (
+		clr_test.pieces.is_empty()
+		and clr_test.move_history.is_empty()
+		and not clr_test.is_game_over
+		and clr_test.last_move == null
+		and clr_test.status_text == "Cyan's Turn"
+		and clr_test.halfmove_clock == 0
+		and clr_test._position_history.is_empty()
+	)
+	clr_test._spawn_piece(PieceData.Team.CYAN, PieceData.Type.KING, GameRules.algebraic_to_axial("g1"))
+	clr_test._spawn_piece(PieceData.Team.CYAN, PieceData.Type.ROOK, GameRules.algebraic_to_axial("c1"))
+	clr_test._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.KING, GameRules.algebraic_to_axial("g10"))
+	var clr_rep_parity := (
+		clr_test.get_repetition_count() == 1
+		and clr_test.get_repetition_count() == clr_test.clone_state().get_repetition_count()
+	)
+	_assert(
+		clr_was_over and clr_reset_ok and clr_rep_parity,
+		"#32: clear_pieces() resets move_history/game-over/status cleanly and get_repetition_count() matches clone_state() on custom setups"
+	)
+
+	# Additional insufficient-material negative cases (K+2N, K+N vs K+N, K+B vs K+N, same-shade K+2B, off-board King)
+	var k2n := GameRules.new()
+	k2n.clear_pieces()
+	k2n._spawn_piece(PieceData.Team.CYAN, PieceData.Type.KING, GameRules.algebraic_to_axial("g1"))
+	k2n._spawn_piece(PieceData.Team.CYAN, PieceData.Type.KNIGHT, GameRules.algebraic_to_axial("d1"))
+	k2n._spawn_piece(PieceData.Team.CYAN, PieceData.Type.KNIGHT, GameRules.algebraic_to_axial("h1"))
+	k2n._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.KING, GameRules.algebraic_to_axial("g10"))
+
+	var kn_kn := GameRules.new()
+	kn_kn.clear_pieces()
+	kn_kn._spawn_piece(PieceData.Team.CYAN, PieceData.Type.KING, GameRules.algebraic_to_axial("g1"))
+	kn_kn._spawn_piece(PieceData.Team.CYAN, PieceData.Type.KNIGHT, GameRules.algebraic_to_axial("d1"))
+	kn_kn._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.KING, GameRules.algebraic_to_axial("g10"))
+	kn_kn._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.KNIGHT, GameRules.algebraic_to_axial("d9"))
+
+	var kb_kn := GameRules.new()
+	kb_kn.clear_pieces()
+	kb_kn._spawn_piece(PieceData.Team.CYAN, PieceData.Type.KING, GameRules.algebraic_to_axial("g1"))
+	kb_kn._spawn_piece(PieceData.Team.CYAN, PieceData.Type.BISHOP, GameRules.algebraic_to_axial("f1"))
+	kb_kn._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.KING, GameRules.algebraic_to_axial("g10"))
+	kb_kn._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.KNIGHT, GameRules.algebraic_to_axial("d9"))
+
+	var k2b_same_side := GameRules.new()
+	k2b_same_side.clear_pieces()
+	k2b_same_side._spawn_piece(PieceData.Team.CYAN, PieceData.Type.KING, GameRules.algebraic_to_axial("g1"))
+	k2b_same_side._spawn_piece(PieceData.Team.CYAN, PieceData.Type.BISHOP, GameRules.algebraic_to_axial("f1"))
+	k2b_same_side._spawn_piece(PieceData.Team.CYAN, PieceData.Type.BISHOP, GameRules.algebraic_to_axial("f4"))
+	k2b_same_side._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.KING, GameRules.algebraic_to_axial("g10"))
+
+	var offboard_king := GameRules.new()
+	offboard_king.clear_pieces()
+	offboard_king._spawn_piece(PieceData.Team.CYAN, PieceData.Type.KING, GameRules.algebraic_to_axial("g1"))
+	offboard_king._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.KING, GameRules.INVALID_HEX)
+	_assert(
+		not k2n.is_insufficient_material()
+		and not kn_kn.is_insufficient_material()
+		and not kb_kn.is_insufficient_material()
+		and not k2b_same_side.is_insufficient_material()
+		and not offboard_king.is_insufficient_material(),
+		"#32: K+2N, K+N vs K+N, K+B vs K+N, same-shade K+2B vs K, and off-board King do NOT trigger insufficient material"
+	)
+
+	# Underpromoting K+P vs K to =B or =N triggers DRAW - Insufficient Material; =Q stays live
+	var up_base := GameRules.new()
+	up_base.clear_pieces()
+	up_base._spawn_piece(PieceData.Team.CYAN, PieceData.Type.KING, GameRules.algebraic_to_axial("g1"))
+	up_base._spawn_piece(PieceData.Team.CYAN, PieceData.Type.PAWN, GameRules.algebraic_to_axial("f10"))
+	up_base._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.KING, GameRules.algebraic_to_axial("a6"))
+	var up_mv_base := _find_legal_move(up_base, "f10", "f11")
+	var up_b := up_base.clone_state()
+	var up_b_mv := up_mv_base.duplicate_move()
+	up_b_mv.promotion_type = PieceData.Type.BISHOP
+	up_b.execute_move(up_b_mv)
+	var up_n := up_base.clone_state()
+	var up_n_mv := up_mv_base.duplicate_move()
+	up_n_mv.promotion_type = PieceData.Type.KNIGHT
+	up_n.execute_move(up_n_mv)
+	var up_q := up_base.clone_state()
+	var up_q_mv := up_mv_base.duplicate_move()
+	up_q_mv.promotion_type = PieceData.Type.QUEEN
+	up_q.execute_move(up_q_mv)
+	_assert(
+		up_b.is_game_over and up_b.status_text == "DRAW - Insufficient Material"
+		and up_n.is_game_over and up_n.status_text == "DRAW - Insufficient Material"
+		and not up_q.is_game_over,
+		"#32: Underpromoting K+P vs K to =B or =N draws by insufficient material while =Q stays live"
+	)
+
+	# En-passant Zobrist: two candidate capturers (one pinned, one legal) still hashes EP target
+	var ep_two := GameRules.new()
+	ep_two.clear_pieces()
+	ep_two._spawn_piece(PieceData.Team.CYAN, PieceData.Type.KING, GameRules.algebraic_to_axial("g1"))
+	ep_two._spawn_piece(PieceData.Team.CYAN, PieceData.Type.ROOK, GameRules.algebraic_to_axial("f1"))
+	ep_two._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.KING, GameRules.algebraic_to_axial("f11"))
+	ep_two._spawn_piece(PieceData.Team.CYAN, PieceData.Type.PAWN, GameRules.algebraic_to_axial("e4"))
+	ep_two._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.PAWN, GameRules.algebraic_to_axial("f6"))
+	ep_two._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.PAWN, GameRules.algebraic_to_axial("d5"))
+	ep_two.current_turn = PieceData.Team.CYAN
+	var ep_two_ok := ep_two.execute_move(_find_legal_move(ep_two, "e4", "e6"))
+	var ep_two_ref := ep_two.clone_state()
+	ep_two_ref.en_passant_target = GameRules.INVALID_HEX
+	ep_two_ref.en_passant_pawn_id = -1
+	_assert(
+		ep_two_ok and ep_two.get_position_key() != ep_two_ref.get_position_key(),
+		"#32: Position key still includes en_passant_target when one capturer (f6) is pinned but the other (d5) is legal"
+	)
+
+	# Threefold repetition with en-passant distinction: 1st occurrence has legal EP, so draw requires 4th board appearance
+	var ep_rep := GameRules.new()
+	ep_rep.clear_pieces()
+	ep_rep._spawn_piece(PieceData.Team.CYAN, PieceData.Type.KING, GameRules.algebraic_to_axial("g1"))
+	ep_rep._spawn_piece(PieceData.Team.CYAN, PieceData.Type.ROOK, GameRules.algebraic_to_axial("c1"))
+	ep_rep._spawn_piece(PieceData.Team.CYAN, PieceData.Type.PAWN, GameRules.algebraic_to_axial("e4"))
+	ep_rep._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.KING, GameRules.algebraic_to_axial("g10"))
+	ep_rep._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.ROOK, GameRules.algebraic_to_axial("c8"))
+	ep_rep._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.PAWN, GameRules.algebraic_to_axial("f6"))
+	ep_rep.current_turn = PieceData.Team.CYAN
+	var ep_rep_ok := ep_rep.execute_move(_find_legal_move(ep_rep, "e4", "e6"))
+	var ep_cycle_1 := [["c8", "c7"], ["c1", "c2"], ["c7", "c8"], ["c2", "c1"]]
+	var ep_cycle_2 := [["c8", "c6"], ["c1", "c3"], ["c6", "c8"], ["c3", "c1"]]
+	var ep_cycle_3 := [["c8", "c5"], ["c1", "c4"], ["c5", "c8"], ["c4", "c1"]]
+	for step in ep_cycle_1:
+		ep_rep_ok = ep_rep_ok and ep_rep.execute_move(_find_legal_move(ep_rep, step[0], step[1]))
+	var ep_rep_after_2nd_board := ep_rep.get_repetition_count()
+	for step in ep_cycle_2:
+		ep_rep_ok = ep_rep_ok and ep_rep.execute_move(_find_legal_move(ep_rep, step[0], step[1]))
+	var ep_rep_after_3rd_board := ep_rep.get_repetition_count()
+	var ep_rep_live_at_3rd := not ep_rep.is_game_over
+	for step in ep_cycle_3:
+		ep_rep_ok = ep_rep_ok and ep_rep.execute_move(_find_legal_move(ep_rep, step[0], step[1]))
+	_assert(
+		ep_rep_ok
+		and ep_rep_after_2nd_board == 1
+		and ep_rep_after_3rd_board == 2
+		and ep_rep_live_at_3rd
+		and ep_rep.get_repetition_count() == 3
+		and ep_rep.is_game_over
+		and ep_rep.status_text == "DRAW - Threefold Repetition",
+		"#32: Threefold repetition distinguishes legal-EP 1st occurrence (draws on 4th board appearance, not 3rd)"
+	)
+
+	# Mid-search (_search_depth > 0) incremental Zobrist hash parity & halfmove_clock resets on capture, EP, quiet promo, capture promo
+	var z_cap := GameRules.new()
+	z_cap.clear_pieces()
+	z_cap._spawn_piece(PieceData.Team.CYAN, PieceData.Type.KING, GameRules.algebraic_to_axial("g1"))
+	z_cap._spawn_piece(PieceData.Team.CYAN, PieceData.Type.ROOK, GameRules.algebraic_to_axial("f4"))
+	z_cap._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.ROOK, GameRules.algebraic_to_axial("f6"))
+	z_cap._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.KING, GameRules.algebraic_to_axial("g10"))
+	z_cap.halfmove_clock = 17
+	var z_cap_pre := z_cap.get_position_key()
+	var z_cap_u := z_cap.push_search_move(_find_legal_move(z_cap, "f4", "f6"))
+	var z_cap_parity := z_cap.halfmove_clock == 0 and z_cap.get_position_key() == z_cap.clone_state().get_position_key()
+	z_cap.pop_search_move(z_cap_u)
+	var z_cap_pop := z_cap.halfmove_clock == 17 and z_cap.get_position_key() == z_cap_pre
+
+	var z_ep := GameRules.new()
+	z_ep.clear_pieces()
+	z_ep._spawn_piece(PieceData.Team.CYAN, PieceData.Type.KING, GameRules.algebraic_to_axial("g1"))
+	z_ep._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.KING, GameRules.algebraic_to_axial("g10"))
+	z_ep._spawn_piece(PieceData.Team.CYAN, PieceData.Type.PAWN, GameRules.algebraic_to_axial("e4"))
+	z_ep._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.PAWN, GameRules.algebraic_to_axial("f6"))
+	z_ep.execute_move(_find_legal_move(z_ep, "e4", "e6"))
+	z_ep.halfmove_clock = 15
+	var z_ep_pre := z_ep.get_position_key()
+	var z_ep_mv := _find_legal_move(z_ep, "f6", "e5")
+	var z_ep_u := z_ep.push_search_move(z_ep_mv)
+	var z_ep_parity := z_ep_mv.is_en_passant and z_ep.halfmove_clock == 0 and z_ep.get_position_key() == z_ep.clone_state().get_position_key()
+	z_ep.pop_search_move(z_ep_u)
+	var z_ep_pop := z_ep.halfmove_clock == 15 and z_ep.get_position_key() == z_ep_pre
+	var z_ep_exec_ok := z_ep.execute_move(z_ep_mv) and z_ep.halfmove_clock == 0
+
+	var z_qpromo := GameRules.new()
+	z_qpromo.clear_pieces()
+	z_qpromo._spawn_piece(PieceData.Team.CYAN, PieceData.Type.KING, GameRules.algebraic_to_axial("g1"))
+	z_qpromo._spawn_piece(PieceData.Team.CYAN, PieceData.Type.PAWN, GameRules.algebraic_to_axial("f10"))
+	z_qpromo._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.KING, GameRules.algebraic_to_axial("a6"))
+	z_qpromo.halfmove_clock = 23
+	var z_qp_pre := z_qpromo.get_position_key()
+	var z_qp_mv := _find_legal_move(z_qpromo, "f10", "f11").duplicate_move()
+	z_qp_mv.promotion_type = PieceData.Type.QUEEN
+	var z_qp_u := z_qpromo.push_search_move(z_qp_mv)
+	var z_qp_parity := z_qpromo.halfmove_clock == 0 and z_qpromo.get_position_key() == z_qpromo.clone_state().get_position_key()
+	z_qpromo.pop_search_move(z_qp_u)
+	var z_qp_pop := z_qpromo.halfmove_clock == 23 and z_qpromo.get_position_key() == z_qp_pre
+	var z_qp_exec_ok := z_qpromo.execute_move(z_qp_mv) and z_qpromo.halfmove_clock == 0
+
+	var z_cpromo := GameRules.new()
+	z_cpromo.clear_pieces()
+	z_cpromo._spawn_piece(PieceData.Team.CYAN, PieceData.Type.KING, GameRules.algebraic_to_axial("g1"))
+	z_cpromo._spawn_piece(PieceData.Team.CYAN, PieceData.Type.PAWN, GameRules.algebraic_to_axial("e10"))
+	z_cpromo._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.ROOK, GameRules.algebraic_to_axial("f11"))
+	z_cpromo._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.KING, GameRules.algebraic_to_axial("a6"))
+	z_cpromo.halfmove_clock = 31
+	var z_cp_pre := z_cpromo.get_position_key()
+	var z_cp_mv := _find_legal_move(z_cpromo, "e10", "f11").duplicate_move()
+	z_cp_mv.promotion_type = PieceData.Type.KNIGHT
+	var z_cp_u := z_cpromo.push_search_move(z_cp_mv)
+	var z_cp_parity := z_cpromo.halfmove_clock == 0 and z_cpromo.get_position_key() == z_cpromo.clone_state().get_position_key()
+	z_cpromo.pop_search_move(z_cp_u)
+	var z_cp_pop := z_cpromo.halfmove_clock == 31 and z_cpromo.get_position_key() == z_cp_pre
+	_assert(
+		z_cap_parity and z_cap_pop
+		and z_ep_parity and z_ep_pop and z_ep_exec_ok
+		and z_qp_parity and z_qp_pop and z_qp_exec_ok
+		and z_cp_parity and z_cp_pop,
+		"#32: Mid-search incremental Zobrist hash & halfmove_clock stay exact across capture, en passant, quiet promo, and capture promo"
+	)
+
+	# push_search_move() seeded_root rollback on both empty (clear_pieces) and stale (pieces.clear) initial history
+	var sr_empty := GameRules.new()
+	sr_empty.clear_pieces()
+	sr_empty._spawn_piece(PieceData.Team.CYAN, PieceData.Type.KING, GameRules.algebraic_to_axial("g1"))
+	sr_empty._spawn_piece(PieceData.Team.CYAN, PieceData.Type.ROOK, GameRules.algebraic_to_axial("c1"))
+	sr_empty._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.KING, GameRules.algebraic_to_axial("g10"))
+	var sr_e_u := sr_empty.push_search_move(_find_legal_move(sr_empty, "c1", "c2"))
+	var sr_e_mid := sr_empty._position_history.size() == 2
+	sr_empty.pop_search_move(sr_e_u)
+	var sr_e_end := sr_empty._position_history.is_empty() and sr_empty._position_counts.is_empty()
+
+	var sr_stale := GameRules.new()
+	var sr_stale_orig_key: int = sr_stale._position_history[0]
+	sr_stale.pieces.clear()
+	sr_stale._spawn_piece(PieceData.Team.CYAN, PieceData.Type.KING, GameRules.algebraic_to_axial("g1"))
+	sr_stale._spawn_piece(PieceData.Team.CYAN, PieceData.Type.ROOK, GameRules.algebraic_to_axial("c1"))
+	sr_stale._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.KING, GameRules.algebraic_to_axial("g10"))
+	var sr_s_u := sr_stale.push_search_move(_find_legal_move(sr_stale, "c1", "c2"))
+	var sr_s_mid := sr_stale._position_history.size() == 2 and sr_stale._position_history[0] != sr_stale_orig_key
+	sr_stale.pop_search_move(sr_s_u)
+	var sr_s_end := sr_stale._position_history.size() == 1 and sr_stale._position_history[0] == sr_stale_orig_key
+	_assert(
+		sr_e_mid and sr_e_end and sr_s_mid and sr_s_end,
+		"#32: push_search_move()/pop_search_move() seeded_root cleanly rolls back both empty and stale initial histories"
+	)
+
+	# Stalemate on halfmove 100 takes precedence over 50-move draw
+	var stale100 := GameRules.new()
+	stale100.clear_pieces()
+	stale100._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.KING, GameRules.algebraic_to_axial("a6"))
+	stale100._spawn_piece(PieceData.Team.CYAN, PieceData.Type.KING, GameRules.algebraic_to_axial("c5"))
+	stale100._spawn_piece(PieceData.Team.CYAN, PieceData.Type.PAWN, GameRules.algebraic_to_axial("f5"))
+	stale100.current_turn = PieceData.Team.CYAN
+	stale100.halfmove_clock = 99
+	var stale100_ok := stale100.execute_move(_find_legal_move(stale100, "c5", "c6"))
+	_assert(
+		stale100_ok
+		and stale100.halfmove_clock == 100
+		and stale100.is_game_over
+		and stale100.status_text == "STALEMATE - Cyan 0.75 : 0.25 Magenta",
+		"#32: Glinski stalemate on halfmove 100 takes precedence over 50-move draw"
+	)
+
+	# Direct _negamax() and _quiescence() score K+B vs K as 0 despite >+300 cp static material eval
+	var kb_search := GameRules.new()
+	kb_search.clear_pieces()
+	kb_search._spawn_piece(PieceData.Team.CYAN, PieceData.Type.KING, GameRules.algebraic_to_axial("g1"))
+	kb_search._spawn_piece(PieceData.Team.CYAN, PieceData.Type.BISHOP, GameRules.algebraic_to_axial("f1"))
+	kb_search._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.KING, GameRules.algebraic_to_axial("g10"))
+	kb_search.current_turn = PieceData.Team.CYAN
+	var kb_static := AIPlayer.evaluate_board(kb_search, PieceData.Team.CYAN)
+	var kb_nega := ai._negamax(kb_search, 1, -AIPlayer.INF_SCORE, AIPlayer.INF_SCORE, PieceData.Team.CYAN, 1, false)
+	var kb_quiesce := ai._quiescence(kb_search, -AIPlayer.INF_SCORE, AIPlayer.INF_SCORE, PieceData.Team.CYAN, 1, 1)
+	_assert(
+		kb_static > 300 and kb_nega == 0 and kb_quiesce == 0,
+		"#32: _negamax() and _quiescence() score K+B vs K as 0 draw despite +%d cp static eval" % kb_static
+	)
+
+	# Winning AI prefers quiet Mate-in-1 on halfmove 100 over resetting clock with a pawn push
+	var m100_ai := GameRules.new()
+	m100_ai.clear_pieces()
+	m100_ai._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.KING, GameRules.algebraic_to_axial("a6"))
+	m100_ai._spawn_piece(PieceData.Team.CYAN, PieceData.Type.KING, GameRules.algebraic_to_axial("d7"))
+	m100_ai._spawn_piece(PieceData.Team.CYAN, PieceData.Type.ROOK, GameRules.algebraic_to_axial("b1"))
+	m100_ai._spawn_piece(PieceData.Team.CYAN, PieceData.Type.ROOK, GameRules.algebraic_to_axial("d3"))
+	m100_ai._spawn_piece(PieceData.Team.CYAN, PieceData.Type.PAWN, GameRules.algebraic_to_axial("f6"))
+	m100_ai.current_turn = PieceData.Team.CYAN
+	m100_ai.halfmove_clock = 99
+	ai._rng.seed = 3
+	var m100_med := ai.choose_move(m100_ai, PieceData.Team.CYAN, AIPlayer.Difficulty.MEDIUM)
+	ai._rng.seed = 3
+	var m100_hard := ai.choose_move(m100_ai, PieceData.Team.CYAN, AIPlayer.Difficulty.HARD)
+	ai._rng.seed = 3
+	var m100_async := await ai.choose_move_async(m100_ai, PieceData.Team.CYAN, AIPlayer.Difficulty.HARD, self)
+	var m100_all_mate := true
+	for cand in [m100_med, m100_hard, m100_async]:
+		var sim := m100_ai.clone_state()
+		if cand == null or not sim.execute_move(cand) or not sim.is_game_over or sim.status_text != "CHECKMATE - Cyan Wins!" or sim.halfmove_clock != 100:
+			m100_all_mate = false
+			break
+	_assert(
+		m100_all_mate,
+		"#32: Winning AI chooses quiet Mate-in-1 on halfmove 100 over pawn push (Medium & Hard sync/async)"
+	)
+
+	# Losing AI claims 50-move draw at halfmove_clock == 99 instead of resetting clock with pawn push
+	var lose50 := GameRules.new()
+	lose50.clear_pieces()
+	lose50._spawn_piece(PieceData.Team.CYAN, PieceData.Type.KING, GameRules.algebraic_to_axial("a1"))
+	var lose50_pawn := lose50._spawn_piece(PieceData.Team.CYAN, PieceData.Type.PAWN, GameRules.algebraic_to_axial("f6"))
+	lose50._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.KING, GameRules.algebraic_to_axial("l4"))
+	lose50._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.QUEEN, GameRules.algebraic_to_axial("f5"))
+	lose50._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.ROOK, GameRules.algebraic_to_axial("l1"))
+	lose50.current_turn = PieceData.Team.CYAN
+	lose50.halfmove_clock = 99
+	ai._rng.seed = 8
+	var l50_e := ai.choose_move(lose50, PieceData.Team.CYAN, AIPlayer.Difficulty.EASY)
+	ai._rng.seed = 8
+	var l50_m := ai.choose_move(lose50, PieceData.Team.CYAN, AIPlayer.Difficulty.MEDIUM)
+	ai._rng.seed = 8
+	var l50_h := ai.choose_move(lose50, PieceData.Team.CYAN, AIPlayer.Difficulty.HARD)
+	ai._rng.seed = 8
+	var l50_async := await ai.choose_move_async(lose50, PieceData.Team.CYAN, AIPlayer.Difficulty.HARD, self)
+	var l50_sim := lose50.clone_state()
+	var l50_draws := l50_h != null and l50_sim.execute_move(l50_h) and l50_sim.is_game_over and l50_sim.status_text == "DRAW - 50-Move Rule"
+	_assert(
+		l50_e != null and l50_e.piece_id != lose50_pawn.id
+		and l50_m != null and l50_m.piece_id != lose50_pawn.id
+		and l50_h != null and l50_h.piece_id != lose50_pawn.id
+		and l50_async != null and l50_async.piece_id != lose50_pawn.id
+		and l50_draws,
+		"#32: Losing AI claims 50-move draw at halfmove_clock=99 across Easy, Medium & Hard (sync/async)"
+	)
+
+	# Also cover async on 6c mate-trap guard
+	ai._rng.seed = 12
+	var trap_async := await ai.choose_move_async(mate_trap, PieceData.Team.CYAN, AIPlayer.Difficulty.HARD, self)
+	_assert(
+		trap_async != null and trap_async.to != c2_hex,
+		"#32: Losing AI (async Hard) also rejects non-terminal 2-fold move (R c3->c2) into opponent Mate-in-1"
+	)
+
+	# ------------------------------------------------------------------
+	# 7. HUD neutral draw status color in Main._refresh_hud()
+	# ------------------------------------------------------------------
+	var main_hud: Control = MainScene.instantiate()
+	root.add_child(main_hud)
+	await process_frame
+	main_hud.new_game_modal.visible = false
+	main_hud.vector_board.rules.clear_pieces()
+	main_hud.vector_board.rules._spawn_piece(PieceData.Team.CYAN, PieceData.Type.KING, GameRules.algebraic_to_axial("f5"))
+	main_hud.vector_board.rules._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.ROOK, GameRules.algebraic_to_axial("e6"))
+	main_hud.vector_board.rules._spawn_piece(PieceData.Team.MAGENTA, PieceData.Type.KING, GameRules.algebraic_to_axial("a6"))
+	main_hud.vector_board.rules.current_turn = PieceData.Team.CYAN
+	main_hud.vector_board.rules._update_game_status()
+	var hud_cap := _find_legal_move(main_hud.vector_board.rules, "f5", "e6")
+	main_hud.is_single_player = true
+	main_hud.human_team = PieceData.Team.CYAN
+	main_hud.vector_board.rules.execute_move(hud_cap)
+	main_hud._on_move_executed(hud_cap, "")
+	var draw_color_ok: bool = (
+		main_hud.status_label.text == "DRAW - Insufficient Material"
+		and main_hud.status_label.modulate == MainScript.COLOR_DRAW_STATUS
+		and not main_hud._ai_thinking
+	)
+	main_hud.vector_board.rules.undo_last_move()
+	main_hud._refresh_hud()
+	var restored_color_ok: bool = (
+		main_hud.status_label.text == "Cyan's Turn"
+		and main_hud.status_label.modulate == VectorBoard.COLOR_CYAN
+	)
+	# Also verify DRAW - 50-Move Rule & DRAW - Threefold Repetition receive neutral draw status color
+	main_hud.vector_board.rules.status_text = "DRAW - Threefold Repetition"
+	main_hud.vector_board.rules.is_game_over = true
+	main_hud._refresh_hud()
+	var rep_color_ok: bool = main_hud.status_label.modulate == MainScript.COLOR_DRAW_STATUS
+	main_hud.vector_board.rules.status_text = "DRAW - 50-Move Rule"
+	main_hud._refresh_hud()
+	var fifty_color_ok: bool = main_hud.status_label.modulate == MainScript.COLOR_DRAW_STATUS
+	main_hud.free()
+	_assert(
+		draw_color_ok and restored_color_ok and rep_color_ok and fifty_color_ok,
+		"#32: Main._refresh_hud() uses neutral COLOR_DRAW_STATUS on all draw types, skips 1P AI turn on draw, and restores team color on undo"
+	)

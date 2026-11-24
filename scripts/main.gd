@@ -10,6 +10,7 @@ const DESKTOP_BASE_SIZE := Vector2i(1280, 800)
 const MOBILE_BASE_SHORT: int = 480
 const MOBILE_BASE_LONG: int = 800
 const ISSUES_URL: String = "https://github.com/mdsolarflare/vector-chess/issues"
+const COLOR_DRAW_STATUS := Color(0.86, 0.92, 1.0, 1.0)
 const SOFTWARE_RENDERER_PATTERNS: Array[String] = [
 	"SwiftShader",
 	"llvmpipe",
@@ -1243,7 +1244,9 @@ func _refresh_hud() -> void:
 	else:
 		status_label.text = rules.status_text
 
-	if rules.current_turn == PieceData.Team.CYAN:
+	if rules.is_game_over and rules.status_text.begins_with("DRAW"):
+		status_label.modulate = COLOR_DRAW_STATUS
+	elif rules.current_turn == PieceData.Team.CYAN:
 		status_label.modulate = VectorBoard.COLOR_CYAN
 	else:
 		status_label.modulate = VectorBoard.COLOR_MAGENTA
