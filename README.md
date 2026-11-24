@@ -3,6 +3,8 @@ It's Polygon Pandemonium
 
 A cross-platform hexagonal chess game built with **Godot 4** (GDScript) featuring procedural vector polygon graphics.
 
+Please report bugs or request a feature in the issues tab.
+
 ## Overview
 - **Ruleset:** Gliński's Hexagonal Chess (91 flat-top hex cells, 3 tile shades, 3 Bishops and 9 Pawns per side)
 - **Visuals:** 100% procedural 2D vector & polygon rendering (`CanvasItem._draw`) with live displacement vector telemetry

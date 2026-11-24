@@ -269,13 +269,23 @@ offset_bottom = 68.0
 grow_horizontal = 0
 tooltip_text = "Hide Side Panel"
 
+[node name="IssuesButton" type="Button" parent="."]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(44, 44)
+layout_mode = 1
+offset_left = 24.0
+offset_top = 24.0
+offset_right = 68.0
+offset_bottom = 68.0
+tooltip_text = "Report Issue / Feature Request (GitHub)"
+
 [node name="GpuWarningBanner" type="PanelContainer" parent="."]
 unique_name_in_owner = true
 visible = false
 layout_mode = 1
 anchors_preset = 10
 anchor_right = 1.0
-offset_left = 16.0
+offset_left = 80.0
 offset_top = 24.0
 offset_right = -372.0
 offset_bottom = 64.0
@@ -473,6 +483,7 @@ tooltip_text = "Confirm New Game"
 [connection signal="pressed" from="MarginContainer/MainLayout/SidePanel/VBox/ControlsGrid/FlipButton" to="." method="_on_flip_pressed"]
 [connection signal="pressed" from="MarginContainer/MainLayout/SidePanel/VBox/ControlsGrid/VectorsButton" to="." method="_on_vectors_pressed"]
 [connection signal="pressed" from="TogglePanelButton" to="." method="_on_toggle_panel_pressed"]
+[connection signal="pressed" from="IssuesButton" to="." method="_on_issues_button_pressed"]
 [connection signal="pressed" from="GpuWarningBanner/BannerHBox/DismissGpuBannerButton" to="." method="_on_dismiss_gpu_banner_pressed"]
 [connection signal="pressed" from="NewGameModal/CenterContainer/ModalPanel/ModalVBox/ModeButtons/Mode1PButton" to="." method="_on_mode_1p_pressed"]
 [connection signal="pressed" from="NewGameModal/CenterContainer/ModalPanel/ModalVBox/ModeButtons/Mode2PButton" to="." method="_on_mode_2p_pressed"]

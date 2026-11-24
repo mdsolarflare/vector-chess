@@ -9,6 +9,7 @@ const AI_THINK_DELAY_SEC: float = 0.35
 const DESKTOP_BASE_SIZE := Vector2i(1280, 800)
 const MOBILE_BASE_SHORT: int = 480
 const MOBILE_BASE_LONG: int = 800
+const ISSUES_URL: String = "https://github.com/mdsolarflare/vector-chess/issues"
 const COLOR_DRAW_STATUS := Color(0.86, 0.92, 1.0, 1.0)
 const SOFTWARE_RENDERER_PATTERNS: Array[String] = [
 	"SwiftShader",
@@ -39,6 +40,7 @@ const SOFTWARE_RENDERER_PATTERNS: Array[String] = [
 @onready var history_header: Label = %HistoryHeader
 @onready var history_label: RichTextLabel = %HistoryLabel
 @onready var toggle_panel_button: Button = %TogglePanelButton
+@onready var issues_button: Button = %IssuesButton
 @onready var controls_grid: GridContainer = %ControlsGrid
 @onready var new_game_button: Button = %NewGameButton
 @onready var undo_button: Button = %UndoButton
@@ -99,6 +101,7 @@ func _ready() -> void:
 	_setup_confirm_slider_theme()
 
 	toggle_panel_button.draw.connect(_on_toggle_panel_button_draw)
+	issues_button.draw.connect(_on_issues_button_draw)
 	new_game_button.draw.connect(_on_new_game_button_draw)
 	undo_button.draw.connect(_on_undo_button_draw)
 	flip_button.draw.connect(_on_flip_button_draw)
@@ -183,6 +186,7 @@ func _resolve_nodes() -> void:
 	history_header = get_node_or_null("%HistoryHeader") as Label
 	history_label = get_node_or_null("%HistoryLabel") as RichTextLabel
 	toggle_panel_button = get_node_or_null("%TogglePanelButton") as Button
+	issues_button = get_node_or_null("%IssuesButton") as Button
 	controls_grid = get_node_or_null("%ControlsGrid") as GridContainer
 	new_game_button = get_node_or_null("%NewGameButton") as Button
 	undo_button = get_node_or_null("%UndoButton") as Button
@@ -293,6 +297,7 @@ func _apply_software_renderer_fallback(adapter: String) -> void:
 
 	for ctrl in [
 		toggle_panel_button,
+		issues_button,
 		new_game_button,
 		undo_button,
 		flip_button,
@@ -413,6 +418,15 @@ func _apply_responsive_layout(vp_size: Vector2, is_mobile: bool) -> void:
 		toggle_panel_button.size = Vector2(btn_sz, btn_sz)
 		toggle_panel_button.queue_redraw()
 
+	if issues_button != null:
+		issues_button.custom_minimum_size = Vector2(btn_sz, btn_sz)
+		issues_button.offset_left = margin_tr
+		issues_button.offset_top = margin_tr
+		issues_button.offset_right = margin_tr + btn_sz
+		issues_button.offset_bottom = margin_tr + btn_sz
+		issues_button.size = Vector2(btn_sz, btn_sz)
+		issues_button.queue_redraw()
+
 	# Reserve top-right clearance inside SidePanel header in landscape so TogglePanelButton never overlaps menu text
 	if toggle_button_spacer != null:
 		var show_spacer := not is_portrait
@@ -450,7 +464,8 @@ func _update_gpu_warning_banner_layout() -> void:
 	else:
 		right_clearance = margin_tr + btn_sz + banner_gap
 
-	gpu_warning_banner.offset_left = outer_margin
+	var left_clearance := margin_tr + btn_sz + banner_gap
+	gpu_warning_banner.offset_left = left_clearance
 	gpu_warning_banner.offset_top = margin_tr
 	gpu_warning_banner.offset_right = -right_clearance
 	gpu_warning_banner.offset_bottom = margin_tr + 40.0
@@ -491,6 +506,10 @@ func _on_toggle_panel_pressed() -> void:
 	_update_toggle_panel_button()
 	_update_gpu_warning_banner_layout()
 	vector_board.queue_redraw()
+
+
+func _on_issues_button_pressed() -> void:
+	OS.shell_open(ISSUES_URL)
 
 
 func _update_toggle_panel_button() -> void:
@@ -573,6 +592,34 @@ func _on_toggle_panel_button_draw() -> void:
 			Vector2(cx + chev_w * 0.5, cy + chev_h),
 		])
 	btn.draw_polyline(chevron, stroke_col, 1.6 * scale_f, aa)
+
+
+## Draws a procedural Git branch icon for the GitHub Issues / Source button.
+func _on_issues_button_draw() -> void:
+	var btn := issues_button
+	var c := btn.size * 0.5
+	var scale_f := maxf(minf(btn.size.x, btn.size.y) / 34.0, 0.85)
+	var aa := _is_line_aa_enabled()
+
+	var stroke_col := Color(0.75, 0.88, 1.0, 0.95)
+	var accent_col := VectorBoard.COLOR_CYAN
+	var bg_col := Color(0.0627451, 0.0784314, 0.129412, 1.0)
+	var line_w := 1.7 * scale_f
+	var node_r := 2.6 * scale_f
+
+	var top_left := c + Vector2(-4.5, -6.0) * scale_f
+	var bot_left := c + Vector2(-4.5, 6.0) * scale_f
+	var top_right := c + Vector2(4.5, -3.5) * scale_f
+	var elbow := Vector2(top_right.x, c.y + 1.5 * scale_f)
+
+	btn.draw_line(top_left, bot_left, stroke_col, line_w, aa)
+	btn.draw_polyline(PackedVector2Array([top_right, elbow, bot_left]), accent_col, line_w, aa)
+
+	for pt in [top_left, bot_left]:
+		btn.draw_circle(pt, node_r, bg_col)
+		btn.draw_arc(pt, node_r, 0.0, TAU, 16, stroke_col, 1.6 * scale_f, aa)
+	btn.draw_circle(top_right, node_r, bg_col)
+	btn.draw_arc(top_right, node_r, 0.0, TAU, 16, accent_col, 1.6 * scale_f, aa)
 
 
 ## Draws a flat-top Hexagon with a bold '+' sign inside for New Game.
